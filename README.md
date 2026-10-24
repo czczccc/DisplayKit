@@ -19,7 +19,13 @@ A small Windows tool that prevents burn-in on OLED monitors. Windows' own "turn 
 - 暂停（30 分钟 / 1–2 小时 / 直到恢复）、开机自启动
 - 托盘图标 + 控制窗口；重复运行 exe 会打开已运行实例的控制窗口
 
-## 编译与安装
+## 下载
+
+到 [Releases](https://github.com/czczccc/OledGuard/releases/latest) 下载 `OledGuard.exe`，直接运行即可（单文件、无需安装，Windows 10/11 自带所需的 .NET Framework 4.8）。
+
+程序没有数字签名，首次运行时 SmartScreen 可能拦截：点"更多信息" → "仍要运行"。建议把 exe 放到固定位置（如 `%LOCALAPPDATA%\Programs\OledGuard\`）后再勾选"开机自启动"。
+
+## 自己编译
 
 不需要安装任何开发工具，使用 Windows 自带的 .NET Framework 4 编译器：
 
@@ -30,6 +36,15 @@ build.bat
 生成的程序在 `%LOCALAPPDATA%\Programs\OledGuard\OledGuard.exe`，单文件、无依赖。运行后在托盘菜单里勾选"开机自启动"即可。
 
 > 如果源码所在文件夹带有低完整性标签（某些沙箱工具会设置），直接放在那里的 exe 会以低权限运行，导致托盘图标不显示、键鼠拦截失效，所以 `build.bat` 会输出到上面的目录。
+
+## 发布新版本
+
+推送 `v` 开头的标签，GitHub Actions 会自动编译并创建 Release：
+
+```bat
+git tag v0.2.0
+git push origin v0.2.0
+```
 
 ## 配置
 

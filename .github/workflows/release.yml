@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        shell: cmd
+        run: '"%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /codepage:65001 /optimize /target:winexe /out:OledGuard.exe /r:System.Windows.Forms.dll /r:System.Drawing.dll OledGuard.cs'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OledGuard
+          path: OledGuard.exe
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: OledGuard.exe
+          generate_release_notes: true
+          body: |
+            下载 `OledGuard.exe` 直接运行即可，单文件、无需安装（需要 Windows 10/11，系统自带 .NET Framework 4.8）。
+
+            首次运行时 Windows SmartScreen 可能提示"已保护你的电脑"，因为程序没有数字签名：点"更多信息" → "仍要运行"。
+
+            建议把 exe 放到固定位置（如 `%LOCALAPPDATA%\Programs\OledGuard\`）再勾选"开机自启动"。
