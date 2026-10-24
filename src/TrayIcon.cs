@@ -40,7 +40,7 @@ class TrayIcon : NativeWindow
     string tip = "OledGuard";
     public bool Added { get; private set; }
     public ContextMenuStrip Menu;
-    public event Action LeftClick;
+    public event Action LeftClick, BalloonClick;
 
     public TrayIcon() { CreateHandle(new CreateParams()); }
 
@@ -107,6 +107,12 @@ class TrayIcon : NativeWindow
         Shell_NotifyIcon(NIM_MODIFY, ref d);
     }
 
+    // 关闭显示器 (由这个隐藏的顶层窗口交给系统处理)
+    public void MonitorOff()
+    {
+        Native.PostMessage(Handle, Native.WM_SYSCOMMAND, new IntPtr(Native.SC_MONITORPOWER), new IntPtr(2));
+    }
+
     public void ShowMenu()
     {
         if (Menu == null) return;
@@ -121,6 +127,7 @@ class TrayIcon : NativeWindow
             int ev = m.LParam.ToInt32() & 0xFFFF;
             if (ev == 0x202 && LeftClick != null) LeftClick(); // 左键: 打开设置
             else if (ev == 0x205) ShowMenu();                   // 右键: 菜单
+            else if (ev == 0x405 && BalloonClick != null) BalloonClick(); // 点击了通知
         }
         else if (m.Msg == TaskbarCreated && TaskbarCreated != 0)
         {

@@ -3,7 +3,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Net;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -17,7 +20,9 @@ interface IKeyCapture
 
 class App : ApplicationContext
 {
-    public const string Version = "0.2.0";
+    public const string Version = "0.3.0";
+    public const string Repo = "czczccc/OledGuard";
+    public static string RepoUrl { get { return "https://github.com/" + Repo; } }
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     const string RunValue = "OledGuard";
     const int GraceMs = 800; // 黑屏后这段时间内忽略输入(比如松开快捷键)
@@ -47,12 +52,23 @@ class App : ApplicationContext
     readonly HashSet<int> swallowMouseUp = new HashSet<int>();
     readonly HashSet<int> swallowKeyUp = new HashSet<int>();
     string guardStatus = "", keepAwakeReason, lastTip;
-    IntPtr fgHwnd; string fgProcess;
+    IntPtr fgHwnd; string fgProcess, fgScreen;
+    bool locked, lockOffSent;
+    int lockedAt;
 
     // 显示模式状态
     DisplayState display;
     int profileIndex = -1;
-    bool switching;
+    bool switching, confirming;
+    int lastAutoCheck = Environment.TickCount;
+    DisplayProfile autoProfile, autoRestore; // 自动切换: 当前生效的模式, 程序退出后要恢复的模式
+    string autoProcess;
+
+    // 检查更新
+    DateTime nextUpdateCheck = DateTime.Now.AddSeconds(15);
+    string latestVersion, updateStatus;
+    bool updateChecking;
+    Icon formIcon;
 
     SettingsForm settings;
     IKeyCapture capture;
@@ -65,7 +81,10 @@ class App : ApplicationContext
     public string GuardStatus { get { return guardStatus; } }
     public DisplayState Display { get { return display; } }
     public int ProfileIndex { get { return profileIndex; } }
-    public Icon AppIcon { get { return iconActive; } }
+    public Icon AppIcon { get { return formIcon ?? iconActive; } }
+    public string LatestVersion { get { return latestVersion; } }
+    public string UpdateStatus { get { return updateStatus; } }
+    public bool UpdateChecking { get { return updateChecking; } }
     public bool Paused { get { return DateTime.Now < pausedUntil; } }
     public DateTime PausedUntil { get { return pausedUntil; } }
     public IKeyCapture Capture { get { return capture; } set { capture = value; pendingModOnly = 0; } }
@@ -79,10 +98,12 @@ class App : ApplicationContext
         Theme.Load();
         ToolStripManager.Renderer = new ModernRenderer();
         MakeIcons();
+        try { formIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
         tray.Icon = iconActive;
         tray.Menu = Ui.Menu();
         tray.Menu.Opening += (s, e) => { FillTrayMenu(); e.Cancel = false; };
         tray.LeftClick += OpenSettings;
+        tray.BalloonClick += delegate { if (latestVersion != null) OpenUrl(RepoUrl + "/releases/latest"); };
         tray.TryAdd();
 
         // 再次运行 exe 时, 新进程会发信号让这里打开设置窗口
@@ -97,6 +118,7 @@ class App : ApplicationContext
 
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
+        SystemEvents.SessionSwitch += OnSessionSwitch;
 
         if (IsAutoStart()) SetAutoStart(true); // exe 换过位置时更新自启路径
         RefreshDisplay();
@@ -223,6 +245,16 @@ class App : ApplicationContext
     }
 
     // 所有全局快捷键都在钩子里处理, 不会被其他程序抢占
+    // 快捷键已被谁占用, 没有冲突时返回 null. exceptKey / exceptProfile 是正在设置的那一项
+    public string HotkeyOwner(int mods, int vk, string exceptKey, DisplayProfile exceptProfile)
+    {
+        if (exceptKey != "blank" && KeyCombo.Same(mods, vk, cfg.BlankMods, cfg.BlankVk)) return "立即黑屏";
+        if (exceptKey != "toggle" && KeyCombo.Same(mods, vk, cfg.ToggleMods, cfg.ToggleVk)) return "循环切换模式";
+        foreach (var p in cfg.Profiles)
+            if (p != exceptProfile && KeyCombo.Same(mods, vk, p.HotkeyMods, p.HotkeyVk)) return "模式「" + p.Name + "」";
+        return null;
+    }
+
     Action FindHotkey(int vk, int mods)
     {
         if (KeyCombo.Matches(vk, mods, cfg.BlankVk, cfg.BlankMods)) return ShowOverlay;
@@ -247,10 +279,19 @@ class App : ApplicationContext
 
     public void BlankNow() { ShowOverlay(); }
 
+    // 要黑屏的显示器; 选中的显示器都不在了就退回全部
+    List<Screen> BlankTargets()
+    {
+        var all = new List<Screen>(Screen.AllScreens);
+        if (cfg.BlankDevices.Count == 0) return all;
+        var list = all.FindAll(s => cfg.BlankDevices.Exists(d => string.Equals(d, s.DeviceName, StringComparison.OrdinalIgnoreCase)));
+        return list.Count > 0 ? list : all;
+    }
+
     void ShowOverlay()
     {
         if (overlayVisible) return;
-        foreach (var s in Screen.AllScreens)
+        foreach (var s in BlankTargets())
         {
             var f = new BlankForm(s.Bounds);
             f.Show();
@@ -310,7 +351,9 @@ class App : ApplicationContext
 
         Native.RECT r;
         if (!Native.GetWindowRect(hwnd, out r)) return false;
-        var b = Screen.FromHandle(hwnd).Bounds;
+        var screen = Screen.FromHandle(hwnd);
+        var b = screen.Bounds;
+        fgScreen = screen.DeviceName;
         return r.Left <= b.Left && r.Top <= b.Top && r.Right >= b.Right && r.Bottom >= b.Bottom;
     }
 
@@ -318,7 +361,8 @@ class App : ApplicationContext
     string KeepAwakeReason(bool fullscreen)
     {
         if (fgProcess != null && Native.GetForegroundWindow() == fgHwnd && cfg.Whitelist.Contains(fgProcess)) return "白名单：" + fgProcess;
-        if (cfg.SkipFullscreen && fullscreen) return "全屏应用";
+        // 全屏应用只在它所在的显示器会被黑屏时才算 (比如游戏在另一块非 OLED 屏上就不影响)
+        if (cfg.SkipFullscreen && fullscreen && BlankTargets().Exists(s => s.DeviceName == fgScreen)) return "全屏应用";
         if (cfg.SkipAudio && audio.IsPlaying()) return "正在播放声音";
         return null;
     }
@@ -344,10 +388,20 @@ class App : ApplicationContext
                 bool wokenSince = monitorOffSent && unchecked(lastRawInput - monitorOffAt) > 0;
                 if ((!monitorOffSent || wokenSince) && Since(lastRawInput) >= 10000)
                 {
-                    Native.PostMessage(overlays[0].Handle, Native.WM_SYSCOMMAND, new IntPtr(Native.SC_MONITORPOWER), new IntPtr(2));
+                    tray.MonitorOff();
                     monitorOffSent = true;
                     monitorOffAt = Environment.TickCount;
                 }
+            }
+        }
+        else if (locked)
+        {
+            // 锁屏时键鼠钩子收不到输入, 不做黑屏判断; 锁屏界面也是静态画面, 按设置关闭显示器
+            lastActivity = Environment.TickCount;
+            if (cfg.LockScreenOffSec > 0 && !lockOffSent && Since(lockedAt) >= cfg.LockScreenOffSec * 1000)
+            {
+                tray.MonitorOff();
+                lockOffSent = true;
             }
         }
         else if (!paused)
@@ -359,7 +413,15 @@ class App : ApplicationContext
                 ShowOverlay();
         }
 
+        if (Since(lastAutoCheck) >= 2000) CheckAutoSwitch();
+        if (cfg.CheckUpdates && DateTime.Now >= nextUpdateCheck)
+        {
+            nextUpdateCheck = DateTime.Now.AddHours(24);
+            CheckForUpdate(false);
+        }
+
         if (overlayVisible) guardStatus = "黑屏中";
+        else if (locked) guardStatus = "已锁屏";
         else if (paused) guardStatus = pausedUntil == DateTime.MaxValue ? "已暂停" : "暂停至 " + pausedUntil.ToString("HH:mm");
         else if (keepAwakeReason != null) guardStatus = "不黑屏（" + keepAwakeReason + "）";
         else
@@ -404,15 +466,33 @@ class App : ApplicationContext
 
     public void SwitchProfile(DisplayProfile p, IWin32Window owner)
     {
-        if (switching) return;
+        SwitchProfile(p, owner, null);
+    }
+
+    // 切换显示模式, 返回切换前的模式 (用于恢复), 失败返回 null.
+    // autoReason 不为空表示由"程序启动时自动切换"触发, 这时不弹确认框
+    DisplayProfile SwitchProfile(DisplayProfile p, IWin32Window owner, string autoReason)
+    {
+        if (switching || confirming) return null;
         switching = true;
+        DisplayProfile before = null;
+        bool needConfirm = false;
         try
         {
-            DisplayController.Apply(DisplayController.ResolveDevice(cfg.DisplayDevice), p);
-            if (owner == null) tray.ShowBalloon("已切换到「" + p.Name + "」", p.Describe(), TrayIcon.InfoInfo);
+            string device = DisplayController.ResolveDevice(cfg.DisplayDevice);
+            var s = DisplayController.GetState(device);
+            before = new DisplayProfile { Name = "之前的模式", Width = s.Width, Height = s.Height, RefreshRate = s.RefreshRate, Scale = s.Scale };
+            DisplayController.Apply(device, p);
+
+            // 第一次切到一个改变分辨率/刷新率的模式时让用户确认, 万一显示器没信号 15 秒后自动恢复
+            bool modeChanged = s.Width != p.Width || s.Height != p.Height || (p.RefreshRate > 0 && Math.Abs(s.RefreshRate - p.RefreshRate) > 1);
+            if (!p.Verified && modeChanged && autoReason == null) needConfirm = true;
+            else if (autoReason != null) tray.ShowBalloon(autoReason + "，已切换到「" + p.Name + "」", p.Describe(), TrayIcon.InfoInfo);
+            else if (owner == null) tray.ShowBalloon("已切换到「" + p.Name + "」", p.Describe(), TrayIcon.InfoInfo);
         }
         catch (Exception ex)
         {
+            before = null;
             Log.Write("切换到 " + p.Name + " 失败: " + ex.Message);
             if (owner != null) MessageBox.Show(owner, ex.Message, "切换到「" + p.Name + "」失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             else tray.ShowBalloon("切换到「" + p.Name + "」失败", ex.Message, TrayIcon.InfoError);
@@ -422,6 +502,46 @@ class App : ApplicationContext
             switching = false;
             RefreshDisplay();
         }
+        if (needConfirm)
+        {
+            var restore = before;
+            invoker.BeginInvoke((Action)delegate { ConfirmProfile(p, restore); });
+        }
+        return before;
+    }
+
+    void ConfirmProfile(DisplayProfile p, DisplayProfile before)
+    {
+        confirming = true;
+        bool keep;
+        using (var f = new ConfirmModeForm(p.Name, AppIcon))
+        {
+            f.ShowDialog();
+            keep = f.Keep;
+        }
+        confirming = false;
+        if (keep)
+        {
+            p.Verified = true;
+            cfg.Save();
+            return;
+        }
+        RestoreMode(before, "已恢复为之前的显示模式");
+    }
+
+    void RestoreMode(DisplayProfile before, string message)
+    {
+        try
+        {
+            DisplayController.Apply(DisplayController.ResolveDevice(cfg.DisplayDevice), before);
+            tray.ShowBalloon(message, before.Describe(), TrayIcon.InfoInfo);
+        }
+        catch (Exception ex)
+        {
+            Log.Write("恢复显示模式失败: " + ex.Message);
+            tray.ShowBalloon("恢复显示模式失败", ex.Message, TrayIcon.InfoError);
+        }
+        RefreshDisplay();
     }
 
     void ToggleProfile()
@@ -429,6 +549,127 @@ class App : ApplicationContext
         if (cfg.Profiles.Count == 0) return;
         RefreshDisplay();
         SwitchProfile(cfg.Profiles[(profileIndex + 1) % cfg.Profiles.Count], null);
+    }
+
+    // 某个模式关联的程序启动时自动切过去, 程序退出后切回原来的模式
+    void CheckAutoSwitch()
+    {
+        lastAutoCheck = Environment.TickCount;
+        if (autoProfile == null && !cfg.Profiles.Exists(p => p.AutoApps.Count > 0)) return;
+        if (switching || confirming) return;
+
+        var running = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var proc in Process.GetProcesses())
+        {
+            try { running.Add(proc.ProcessName); }
+            catch { }
+            finally { proc.Dispose(); }
+        }
+
+        if (autoProfile != null)
+        {
+            if (running.Contains(autoProcess)) return;
+            var restore = autoRestore;
+            string name = autoProcess;
+            autoProfile = null;
+            autoProcess = null;
+            autoRestore = null;
+            if (restore != null) RestoreMode(restore, name + ".exe 已退出，恢复显示模式");
+            return;
+        }
+
+        foreach (var p in cfg.Profiles)
+            foreach (var exe in p.AutoApps)
+            {
+                if (!running.Contains(exe)) continue;
+                autoProfile = p;
+                autoProcess = exe;
+                // 已经是这个模式就不用切, 程序退出后也不切回
+                autoRestore = profileIndex >= 0 && cfg.Profiles[profileIndex] == p ? null : SwitchProfile(p, null, "检测到 " + exe + ".exe");
+                return;
+            }
+    }
+
+    void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
+    {
+        invoker.BeginInvoke((Action)delegate
+        {
+            if (e.Reason == SessionSwitchReason.SessionLock)
+            {
+                locked = true;
+                lockedAt = Environment.TickCount;
+                lockOffSent = false;
+            }
+            else if (e.Reason == SessionSwitchReason.SessionUnlock)
+            {
+                // 解锁时用户已经输过密码, 不需要再按唤醒键
+                locked = false;
+                HideOverlay();
+                lastActivity = Environment.TickCount;
+            }
+        });
+    }
+
+    // ---------- 检查更新 ----------
+
+    public void CheckForUpdate(bool manual)
+    {
+        if (updateChecking) return;
+        updateChecking = true;
+        updateStatus = "正在检查…";
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            string tag = null, error = null;
+            try
+            {
+                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072; // TLS 1.2
+                using (var wc = new WebClient())
+                {
+                    wc.Encoding = Encoding.UTF8;
+                    wc.Headers.Add("User-Agent", "OledGuard/" + Version);
+                    string json = wc.DownloadString("https://api.github.com/repos/" + Repo + "/releases/latest");
+                    var m = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"");
+                    if (m.Success) tag = m.Groups[1].Value;
+                    else error = "没有找到版本信息";
+                }
+            }
+            catch (Exception ex) { error = ex.Message; }
+            invoker.BeginInvoke((Action)delegate { OnUpdateChecked(tag, error, manual); });
+        });
+    }
+
+    void OnUpdateChecked(string tag, string error, bool manual)
+    {
+        updateChecking = false;
+        if (error != null)
+        {
+            updateStatus = "检查失败：" + error;
+            Log.Write("检查更新失败: " + error);
+        }
+        else if (IsNewer(tag, Version))
+        {
+            bool first = latestVersion != tag;
+            latestVersion = tag;
+            updateStatus = "发现新版本 v" + tag;
+            if (first) tray.ShowBalloon("OledGuard 有新版本 v" + tag, "点击这里打开下载页面", TrayIcon.InfoInfo);
+        }
+        else
+        {
+            updateStatus = "已是最新版本";
+        }
+        if (settings != null) settings.OnUpdateChecked();
+    }
+
+    static bool IsNewer(string remote, string local)
+    {
+        System.Version r, l;
+        return System.Version.TryParse(remote, out r) && System.Version.TryParse(local, out l) && r > l;
+    }
+
+    public static void OpenUrl(string target)
+    {
+        try { Process.Start(new ProcessStartInfo(target) { UseShellExecute = true }); }
+        catch (Exception ex) { Log.Write("打开 " + target + " 失败: " + ex.Message); }
     }
 
     void OnDisplaySettingsChanged(object sender, EventArgs e)
@@ -470,6 +711,7 @@ class App : ApplicationContext
     {
         if (settings == null)
         {
+            Ui.SetDpi(Ui.DpiAt(Cursor.Position));
             settings = new SettingsForm(this);
             settings.FormClosed += delegate
             {
@@ -498,6 +740,10 @@ class App : ApplicationContext
         foreach (ToolStripItem it in m.Items) old.Add(it);
         m.Items.Clear();
         foreach (var it in old) it.Dispose();
+        // 菜单按任务栏所在屏幕的缩放显示 (设置窗口开着时沿用它的缩放)
+        if (settings == null || !settings.Visible) Ui.SetDpi(Ui.DpiAt(Cursor.Position));
+        m.Font = Theme.Font;
+        m.Padding = new Padding(0, Ui.S(4), 0, Ui.S(4));
 
         m.Items.Add(Ui.Label("防烧屏：" + guardStatus));
         if (display != null) m.Items.Add(Ui.Label("显示：" + display.Describe()));
@@ -590,6 +836,7 @@ class App : ApplicationContext
         timer.Stop();
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+        SystemEvents.SessionSwitch -= OnSessionSwitch;
         if (overlayVisible) HideOverlay();
         if (mouseHook != IntPtr.Zero) Native.UnhookWindowsHookEx(mouseHook);
         if (keyHook != IntPtr.Zero) Native.UnhookWindowsHookEx(keyHook);

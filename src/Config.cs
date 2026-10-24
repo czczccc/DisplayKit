@@ -64,6 +64,12 @@ static class KeyCombo
         return wantVk != 0 && Normalize(vk) == wantVk && mods == (wantMods & ~ModBit(wantVk));
     }
 
+    // 两个设置好的快捷键是否相同
+    public static bool Same(int mods1, int vk1, int mods2, int vk2)
+    {
+        return vk1 != 0 && vk1 == vk2 && (mods1 & ~ModBit(vk1)) == (mods2 & ~ModBit(vk2));
+    }
+
     // 全局快捷键是否可用, 不可用时返回原因
     public static string Validate(int mods, int vk)
     {
@@ -192,6 +198,8 @@ class DisplayProfile
     public int RefreshRate; // 0 = 不改
     public int Scale;       // 0 = 不改
     public int HotkeyVk, HotkeyMods;
+    public List<string> AutoApps = new List<string>(); // 这些程序运行时自动切到此模式 (进程名, 小写, 不含 .exe)
+    public bool Verified; // 用户已确认过这个模式能正常显示, 之后切换不再询问
 
     public string Describe()
     {
@@ -201,7 +209,20 @@ class DisplayProfile
         return s;
     }
 
-    public DisplayProfile Clone() { return (DisplayProfile)MemberwiseClone(); }
+    public DisplayProfile Clone()
+    {
+        var p = (DisplayProfile)MemberwiseClone();
+        p.AutoApps = new List<string>(AutoApps);
+        return p;
+    }
+
+    public static List<string> SplitList(string v)
+    {
+        var list = new List<string>();
+        foreach (var name in v.Split('|'))
+            if (name.Trim().Length > 0) list.Add(name.Trim().ToLowerInvariant());
+        return list;
+    }
 }
 
 class Settings
@@ -219,6 +240,9 @@ class Settings
     public int WakeVk = 0x20, WakeMods = 0;                          // 唤醒键, 默认空格
     public int BlankVk = (int)Keys.B, BlankMods = KeyCombo.Ctrl | KeyCombo.Alt; // 立即黑屏, 默认 Ctrl+Alt+B
     public List<string> Whitelist = new List<string>(); // 进程名, 小写, 不含 .exe
+    public List<string> BlankDevices = new List<string>(); // 要黑屏的显示器 (\\.\DISPLAYn), 空 = 全部
+    public int LockScreenOffSec = 10;   // 锁屏后多少秒关闭显示器, 0 = 不关
+    public bool CheckUpdates = true;
 
     // ----- 显示模式 -----
     public string DisplayDevice = "";   // 留空 = 主显示器
@@ -289,11 +313,14 @@ class Settings
             case "WakeMods": if (int.TryParse(v, out n) && n >= 0 && n < 16) WakeMods = n; break;
             case "BlankVk": if (int.TryParse(v, out n) && n > 0 && n < 256) BlankVk = n; break;
             case "BlankMods": if (int.TryParse(v, out n) && n >= 0 && n < 16) BlankMods = n; break;
-            case "Whitelist":
-                Whitelist.Clear();
-                foreach (var name in v.Split('|'))
-                    if (name.Trim().Length > 0) Whitelist.Add(name.Trim().ToLowerInvariant());
+            case "Whitelist": Whitelist = DisplayProfile.SplitList(v); break;
+            case "BlankDevices":
+                BlankDevices.Clear();
+                foreach (var d in v.Split('|'))
+                    if (d.Trim().Length > 0) BlankDevices.Add(d.Trim());
                 break;
+            case "LockScreenOffSec": if (int.TryParse(v, out n) && n >= 0) LockScreenOffSec = n; break;
+            case "CheckUpdates": CheckUpdates = v == "1"; break;
         }
     }
 
@@ -312,6 +339,8 @@ class Settings
         else if (string.Equals(k, "RefreshRate", StringComparison.OrdinalIgnoreCase) && int.TryParse(v, out n)) p.RefreshRate = Math.Max(0, n);
         else if (string.Equals(k, "Scale", StringComparison.OrdinalIgnoreCase) && int.TryParse(v.TrimEnd('%'), out n)) p.Scale = Math.Max(0, n);
         else if (string.Equals(k, "Hotkey", StringComparison.OrdinalIgnoreCase) && KeyCombo.Parse(v, out m, out n)) { p.HotkeyVk = n; p.HotkeyMods = m; }
+        else if (k == "AutoApps") p.AutoApps = DisplayProfile.SplitList(v);
+        else if (k == "Verified") p.Verified = v == "1";
     }
 
     public void Save()
@@ -332,6 +361,9 @@ class Settings
             sb.AppendLine("WakeKey=" + KeyCombo.Format(WakeMods, WakeVk));
             sb.AppendLine("BlankKey=" + KeyCombo.Format(BlankMods, BlankVk));
             sb.AppendLine("Whitelist=" + string.Join("|", Whitelist.ToArray()));
+            sb.AppendLine("BlankDevices=" + string.Join("|", BlankDevices.ToArray()));
+            sb.AppendLine("LockScreenOffSec=" + LockScreenOffSec);
+            sb.AppendLine("CheckUpdates=" + (CheckUpdates ? "1" : "0"));
             sb.AppendLine();
             sb.AppendLine("[Display]");
             sb.AppendLine("Device=" + DisplayDevice);
@@ -345,6 +377,8 @@ class Settings
                 sb.AppendLine("RefreshRate=" + p.RefreshRate);
                 sb.AppendLine("Scale=" + p.Scale);
                 sb.AppendLine("Hotkey=" + KeyCombo.Format(p.HotkeyMods, p.HotkeyVk));
+                sb.AppendLine("AutoApps=" + string.Join("|", p.AutoApps.ToArray()));
+                sb.AppendLine("Verified=" + (p.Verified ? "1" : "0"));
             }
             File.WriteAllText(FilePath, sb.ToString(), new UTF8Encoding(true));
         }

@@ -35,16 +35,20 @@ static class Theme
             Control = C(0xFEFEFE); ControlHover = C(0xF6F6F6); ControlPressed = C(0xF0F0F0);
             MenuHover = C(0xF0F0F0); NavHover = C(0xEAEAEA); NavSelected = C(0xE5E5E5); Warn = C(0x9D5D00);
         }
-        if (Font == null)
-        {
-            Font = new Font(Face, 9.5f);
-            Bold = new Font(Face, 9.5f, FontStyle.Bold);
-            Small = new Font(Face, 8.5f);
-            Header = new Font(Face, 11f, FontStyle.Bold);
-            Title = new Font(Face, 17f, FontStyle.Bold);
-            Icons = new Font("Segoe Fluent Icons", 11f);
-            if (Icons.Name != "Segoe Fluent Icons") Icons = new Font("Segoe MDL2 Assets", 11f); // Windows 10
-        }
+        if (Font == null) MakeFonts();
+    }
+
+    // 字体按像素和当前缩放计算 (不用磅值: 磅值换算依赖进程启动时的系统 DPI, 缩放改变后不会更新)
+    public static void MakeFonts()
+    {
+        float s = Ui.Scale;
+        Font = new Font(Face, 12.7f * s, GraphicsUnit.Pixel);
+        Bold = new Font(Face, 12.7f * s, FontStyle.Bold, GraphicsUnit.Pixel);
+        Small = new Font(Face, 11.3f * s, GraphicsUnit.Pixel);
+        Header = new Font(Face, 14.7f * s, FontStyle.Bold, GraphicsUnit.Pixel);
+        Title = new Font(Face, 22.7f * s, FontStyle.Bold, GraphicsUnit.Pixel);
+        Icons = new Font("Segoe Fluent Icons", 14.7f * s, GraphicsUnit.Pixel);
+        if (Icons.Name != "Segoe Fluent Icons") Icons = new Font("Segoe MDL2 Assets", 14.7f * s, GraphicsUnit.Pixel); // Windows 10
     }
 
     public static bool TaskbarLight() { return ReadDword(PersonalizeKey, "SystemUsesLightTheme", 0) == 1; }
@@ -104,10 +108,32 @@ static class Ui
     {
         get
         {
-            if (scale == 0)
-                using (var g = Graphics.FromHwnd(IntPtr.Zero)) scale = g.DpiX / 96f;
+            if (scale == 0) SetDpi(DpiAt(Cursor.Position));
             return scale;
         }
+    }
+
+    // 切换界面缩放 (显示器缩放改变或窗口移到另一块屏幕时), 返回是否有变化
+    public static bool SetDpi(int dpi)
+    {
+        float s = Math.Max(1f, dpi / 96f);
+        if (Math.Abs(s - scale) < 0.001f) return false;
+        scale = s;
+        Theme.MakeFonts();
+        return true;
+    }
+
+    // 某个点所在显示器的实际缩放
+    public static int DpiAt(Point p)
+    {
+        try
+        {
+            var pt = new Native.POINT { X = p.X, Y = p.Y };
+            uint dx, dy;
+            if (Native.GetDpiForMonitor(Native.MonitorFromPoint(pt, 2), 0, out dx, out dy) == 0 && dx > 0) return (int)dx;
+        }
+        catch { }
+        using (var g = Graphics.FromHwnd(IntPtr.Zero)) return (int)g.DpiX;
     }
 
     public static int S(int px) { return (int)Math.Round(px * Scale); }
@@ -446,7 +472,8 @@ class Card : Panel
         int textW = Width - pad * 2 - (right == null ? 0 : right.Width + Ui.S(16));
 
         var t = Ui.Text(title, Theme.Font, Theme.Text, Theme.Card);
-        t.Bounds = sub == null ? new Rectangle(pad, y, textW, h) : new Rectangle(pad, y + Ui.S(12), textW, Ui.S(24));
+        // 标签不要盖住行与行之间的分隔线
+        t.Bounds = sub == null ? new Rectangle(pad, y + Ui.S(2), textW, h - Ui.S(4)) : new Rectangle(pad, y + Ui.S(12), textW, Ui.S(24));
         Controls.Add(t);
         if (sub != null)
         {

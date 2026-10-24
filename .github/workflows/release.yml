@@ -16,7 +16,7 @@ jobs:
 
       - name: Build
         shell: cmd
-        run: '"%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /codepage:65001 /optimize /target:winexe /win32manifest:src\app.manifest /out:OledGuard.exe /r:System.Windows.Forms.dll /r:System.Drawing.dll src\*.cs'
+        run: '"%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /codepage:65001 /optimize /target:winexe /win32manifest:src\app.manifest /win32icon:src\app.ico /out:OledGuard.exe /r:System.Windows.Forms.dll /r:System.Drawing.dll src\*.cs'
 
       - uses: actions/upload-artifact@v4
         with:

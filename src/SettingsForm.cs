@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 // 设置窗口: 左侧导航, 右侧卡片式设置, 修改即时生效
@@ -47,19 +49,47 @@ class SettingsForm : Form, IKeyCapture
         Controls.Add(content);
         Controls.Add(nav);
 
-        int h = Math.Min(S(780), (int)(Screen.PrimaryScreen.WorkingArea.Height * 0.9));
-        ClientSize = new Size(nav.Width + X * 2 + W + SystemInformation.VerticalScrollBarWidth, h);
-
+        ApplySize(Screen.FromPoint(Cursor.Position));
         ApplyColors();
         BuildNav();
         Rebuild();
         Deactivate += delegate { if (captureTarget != 0) { captureTarget = 0; keyHint = null; Rebuild(); } };
     }
 
+    void ApplySize(Screen screen)
+    {
+        Font = Theme.Font;
+        nav.Width = S(220);
+        int h = Math.Min(S(780), (int)(screen.WorkingArea.Height * 0.9));
+        ClientSize = new Size(nav.Width + X * 2 + W + S(17), h); // 预留滚动条宽度
+    }
+
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
         Theme.ApplyWindow(Handle);
+    }
+
+    // 显示器缩放改变或窗口拖到另一块缩放不同的屏幕: 按新缩放重新排版
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == Native.WM_DPICHANGED)
+        {
+            var r = (Native.RECT)Marshal.PtrToStructure(m.LParam, typeof(Native.RECT));
+            Ui.SetDpi(m.WParam.ToInt32() & 0xFFFF);
+            Location = new Point(r.Left, r.Top);
+            ApplySize(Screen.FromPoint(new Point((r.Left + r.Right) / 2, (r.Top + r.Bottom) / 2)));
+            BuildNav();
+            Rebuild();
+            m.Result = IntPtr.Zero;
+            return;
+        }
+        base.WndProc(ref m);
+    }
+
+    public void OnUpdateChecked()
+    {
+        if (page == Page.General && captureTarget == 0) Rebuild();
     }
 
     void ApplyColors()
@@ -200,15 +230,18 @@ class SettingsForm : Form, IKeyCapture
         return b;
     }
 
+    ContextMenuStrip lastMenu;
+
     RoundButton Drop(string text, Func<ContextMenuStrip> factory, int minWidth)
     {
         var b = new RoundButton(text) { Chevron = true };
         b.FitWidth(minWidth);
         b.Click += delegate
         {
-            var m = factory();
-            m.Closed += delegate { BeginInvoke((Action)m.Dispose); };
-            m.Show(b, new Point(0, b.Height + S(4)));
+            // 上一个菜单到这时才释放: 菜单项里可能弹出对话框, 关闭后立刻释放会出问题
+            if (lastMenu != null) lastMenu.Dispose();
+            lastMenu = factory();
+            lastMenu.Show(b, new Point(0, b.Height + S(4)));
         };
         return b;
     }
@@ -255,7 +288,13 @@ class SettingsForm : Form, IKeyCapture
         }
         else
         {
-            string err = t == TargetWake ? null : KeyCombo.Validate(mods, vk);
+            string err = null;
+            if (t != TargetWake)
+            {
+                err = KeyCombo.Validate(mods, vk);
+                string owner = err == null ? app.HotkeyOwner(mods, vk, t == TargetBlank ? "blank" : "toggle", null) : null;
+                if (owner != null) err = "这个快捷键已被「" + owner + "」使用，请换一个。";
+            }
             if (err != null)
             {
                 keyHint = err;
@@ -339,6 +378,14 @@ class SettingsForm : Form, IKeyCapture
             foreach (int px in Thresholds) { int v = px; Ui.Item(m.Items, ThresholdName(v), cfg.MoveThreshold == v, delegate { cfg.MoveThreshold = v; Changed(); }); }
             return m;
         }, S(150)));
+        if (Screen.AllScreens.Length > 1)
+            c1.AddRow("黑屏的显示器", "只黑 OLED 屏，其他屏幕照常显示；关闭显示器会关掉全部屏幕", Drop(BlankDevicesName(), BlankDevicesMenu, S(150)));
+        c1.AddRow("锁屏后关闭显示器", "锁屏界面也是静态画面，本程序无法覆盖", Drop(LockOffName(cfg.LockScreenOffSec), delegate
+        {
+            var m = Ui.Menu();
+            foreach (int sec in LockOffs) { int v = sec; Ui.Item(m.Items, LockOffName(v), cfg.LockScreenOffSec == v, delegate { cfg.LockScreenOffSec = v; Changed(); }); }
+            return m;
+        }, S(150)));
         y = Section("黑屏", c1, y);
 
         var c2 = new Card(W);
@@ -372,9 +419,61 @@ class SettingsForm : Form, IKeyCapture
         return y;
     }
 
+    static readonly int[] LockOffs = { 0, 3, 10, 60, 300 };
+
+    static string LockOffName(int sec)
+    {
+        if (sec == 0) return "不关闭";
+        if (sec <= 3) return "立即";
+        return sec < 60 ? sec + " 秒后" : sec / 60 + " 分钟后";
+    }
+
+    string BlankDevicesName()
+    {
+        var list = app.Cfg.BlankDevices;
+        if (list.Count == 0) return "全部显示器";
+        if (list.Count > 1) return list.Count + " 台显示器";
+        foreach (var d in SafeDisplays())
+            if (string.Equals(d.Device, list[0], StringComparison.OrdinalIgnoreCase)) return d.Name;
+        return list[0].Replace(@"\\.\", "");
+    }
+
+    ContextMenuStrip BlankDevicesMenu()
+    {
+        var list = app.Cfg.BlankDevices;
+        var m = Ui.Menu();
+        Ui.Item(m.Items, "全部显示器", list.Count == 0, delegate { list.Clear(); Changed(); });
+        m.Items.Add(Ui.Separator());
+        foreach (var d in SafeDisplays())
+        {
+            string dev = d.Device;
+            bool on = list.Exists(x => string.Equals(x, dev, StringComparison.OrdinalIgnoreCase));
+            Ui.Item(m.Items, d.Name + (d.Primary ? "（主）" : "") + "  " + dev.Replace(@"\\.\", ""), on, delegate
+            {
+                // 从"全部"开始点某一台: 只选这一台; 否则切换勾选
+                if (on) list.RemoveAll(x => string.Equals(x, dev, StringComparison.OrdinalIgnoreCase));
+                else list.Add(dev);
+                Changed();
+            });
+        }
+        return m;
+    }
+
+    static List<DisplayInfo> SafeDisplays()
+    {
+        try { return DisplayController.ListDisplays(); }
+        catch { return new List<DisplayInfo>(); }
+    }
+
     ContextMenuStrip WhitelistMenu()
     {
         var cfg = app.Cfg;
+        return ProgramPicker(cfg.Whitelist, n => { cfg.Whitelist.Add(n); Changed(); }, this);
+    }
+
+    // 列出有窗口的正在运行的程序, 外加"浏览"选择 exe
+    public static ContextMenuStrip ProgramPicker(List<string> exclude, Action<string> pick, IWin32Window owner)
+    {
         var m = Ui.Menu();
         var names = new SortedSet<string>();
         int self = Process.GetCurrentProcess().Id;
@@ -385,18 +484,27 @@ class SettingsForm : Form, IKeyCapture
                 if (p.Id != self && p.MainWindowHandle != IntPtr.Zero)
                 {
                     string n = p.ProcessName.ToLowerInvariant();
-                    if (n != "explorer" && n != "applicationframehost" && n != "textinputhost" && !cfg.Whitelist.Contains(n)) names.Add(n);
+                    if (n != "explorer" && n != "applicationframehost" && n != "textinputhost" && n != "systemsettings" && !exclude.Contains(n)) names.Add(n);
                 }
             }
             catch { }
             finally { p.Dispose(); }
         }
-        if (names.Count == 0) Ui.Item(m.Items, "没有可添加的程序", false, null).Enabled = false;
         foreach (var name in names)
         {
             string n = name;
-            Ui.Item(m.Items, n + ".exe", false, delegate { cfg.Whitelist.Add(n); Changed(); });
+            Ui.Item(m.Items, n + ".exe", false, delegate { pick(n); });
         }
+        if (names.Count > 0) m.Items.Add(Ui.Separator());
+        Ui.Item(m.Items, "浏览 exe 文件…", false, delegate
+        {
+            using (var ofd = new OpenFileDialog { Title = "选择程序", Filter = "程序 (*.exe)|*.exe" })
+            {
+                if (ofd.ShowDialog(owner) != DialogResult.OK) return;
+                string n = Path.GetFileNameWithoutExtension(ofd.FileName).ToLowerInvariant();
+                if (!exclude.Contains(n)) pick(n);
+            }
+        });
         return m;
     }
 
@@ -443,6 +551,7 @@ class SettingsForm : Form, IKeyCapture
             int idx = i;
             bool isCurrent = i == app.ProfileIndex;
             string sub = p.Describe() + (p.HotkeyVk != 0 ? "   ·   " + KeyCombo.Name(p.HotkeyMods, p.HotkeyVk) : "");
+            if (p.AutoApps.Count > 0) sub += "   ·   自动：" + string.Join("、", p.AutoApps.ToArray());
 
             var apply = Button(isCurrent ? "当前" : "应用", !isCurrent, delegate { app.SwitchProfile(p, this); Later(); });
             apply.Enabled = !isCurrent;
@@ -492,7 +601,7 @@ class SettingsForm : Form, IKeyCapture
         for (int i = 0; i < cfg.Profiles.Count; i++)
             if (i != idx) taken.Add(cfg.Profiles[i].Name);
 
-        using (var dlg = new ProfileEditor(app, source.Clone(), idx < 0, taken))
+        using (var dlg = new ProfileEditor(app, source.Clone(), idx >= 0 ? cfg.Profiles[idx] : null, taken))
         {
             app.Capture = dlg;
             var result = dlg.ShowDialog(this);
@@ -562,22 +671,33 @@ class SettingsForm : Form, IKeyCapture
             }, S(120)));
         y = Section("运行", c1, y);
 
+        var cfg = app.Cfg;
         var c2 = new Card(W);
-        c2.AddRow("OledGuard v" + App.Version, "OLED 防烧屏 + 显示模式切换", Button("GitHub", false, delegate { Open("https://github.com/czczccc/OledGuard"); }));
-        c2.AddRow("配置与日志", Settings.Dir, Button("打开文件夹", false, delegate
+        c2.AddRow("自动检查更新", "每天检查一次 GitHub 上的新版本，有更新时在托盘提醒", Switch(cfg.CheckUpdates, v => cfg.CheckUpdates = v));
+        if (app.LatestVersion != null)
         {
-            System.IO.Directory.CreateDirectory(Settings.Dir);
-            Open(Settings.Dir);
-        }));
-        c2.AddRow("退出程序", "关闭本窗口不会退出，程序会在托盘继续运行", Button("退出", false, delegate { app.ExitThread(); }));
-        y = Section("关于", c2, y);
-        return y;
-    }
+            var t = c2.AddRow("发现新版本 v" + app.LatestVersion, "当前版本 v" + App.Version + "，下载后替换现在的 exe 即可",
+                Button("下载", true, delegate { App.OpenUrl(App.RepoUrl + "/releases/latest"); }));
+            t.ForeColor = Theme.Accent;
+        }
+        else
+        {
+            var check = Button(app.UpdateChecking ? "检查中…" : "检查更新", false, delegate { app.CheckForUpdate(true); Later(); });
+            check.Enabled = !app.UpdateChecking;
+            c2.AddRow("OledGuard v" + App.Version, app.UpdateStatus ?? "OLED 防烧屏 + 显示模式切换", check);
+        }
+        y = Section("更新", c2, y);
 
-    static void Open(string target)
-    {
-        try { Process.Start(new ProcessStartInfo(target) { UseShellExecute = true }); }
-        catch (Exception ex) { Log.Write("打开 " + target + " 失败: " + ex.Message); }
+        var c3 = new Card(W);
+        c3.AddRow("项目主页", App.RepoUrl.Replace("https://", ""), Button("GitHub", false, delegate { App.OpenUrl(App.RepoUrl); }));
+        c3.AddRow("配置与日志", Settings.Dir, Button("打开文件夹", false, delegate
+        {
+            Directory.CreateDirectory(Settings.Dir);
+            App.OpenUrl(Settings.Dir);
+        }));
+        c3.AddRow("退出程序", "关闭本窗口不会退出，程序会在托盘继续运行", Button("退出", false, delegate { app.ExitThread(); }));
+        y = Section("关于", c3, y);
+        return y;
     }
 }
 
@@ -588,6 +708,7 @@ class ProfileEditor : Form, IKeyCapture
     readonly List<Resolution> resolutions;
     readonly List<string> taken;
     readonly bool isNew;
+    readonly DisplayProfile original; // 被编辑的模式本身, 新建时为 null
     public DisplayProfile Result;
     bool capturing;
     string hint;
@@ -596,12 +717,13 @@ class ProfileEditor : Form, IKeyCapture
     public bool IsCapturing { get { return capturing; } }
 
     static int S(int v) { return Ui.S(v); }
-    int W { get { return S(460); } }
+    int W { get { return S(480); } }
 
-    public ProfileEditor(App app, DisplayProfile profile, bool isNew, List<string> taken)
+    public ProfileEditor(App app, DisplayProfile profile, DisplayProfile original, List<string> taken)
     {
         this.app = app;
-        this.isNew = isNew;
+        this.original = original;
+        isNew = original == null;
         this.taken = taken;
         Result = profile;
         Text = isNew ? "添加模式" : "编辑模式";
@@ -636,17 +758,33 @@ class ProfileEditor : Form, IKeyCapture
         return null;
     }
 
-    RoundButton Drop(string text, Func<ContextMenuStrip> factory)
+    ContextMenuStrip lastMenu;
+
+    RoundButton Drop(string text, Func<ContextMenuStrip> factory, int minWidth)
     {
         var b = new RoundButton(text) { Chevron = true };
-        b.FitWidth(S(200));
+        b.FitWidth(minWidth);
         b.Click += delegate
         {
-            var m = factory();
-            m.Closed += delegate { BeginInvoke((Action)m.Dispose); };
-            m.Show(b, new Point(0, b.Height + S(4)));
+            if (lastMenu != null) lastMenu.Dispose();
+            lastMenu = factory();
+            lastMenu.Show(b, new Point(0, b.Height + S(4)));
         };
         return b;
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == Native.WM_DPICHANGED)
+        {
+            var r = (Native.RECT)Marshal.PtrToStructure(m.LParam, typeof(Native.RECT));
+            Ui.SetDpi(m.WParam.ToInt32() & 0xFFFF);
+            Location = new Point(r.Left, r.Top);
+            Build();
+            m.Result = IntPtr.Zero;
+            return;
+        }
+        base.WndProc(ref m);
     }
 
     void Build()
@@ -657,6 +795,7 @@ class ProfileEditor : Form, IKeyCapture
         Controls.Clear();
         foreach (var c in old) c.Dispose();
 
+        Font = Theme.Font;
         int x = S(24), y = S(20);
         var card = new Card(W);
 
@@ -680,7 +819,7 @@ class ProfileEditor : Form, IKeyCapture
             }
             if (resolutions.Count == 0) Ui.Item(m.Items, "读取不到显示器支持的分辨率", false, null).Enabled = false;
             return m;
-        }));
+        }, S(200)));
 
         card.AddRow("刷新率", null, Drop(Result.RefreshRate > 0 ? Result.RefreshRate + " Hz" : "不改", delegate
         {
@@ -694,7 +833,7 @@ class ProfileEditor : Form, IKeyCapture
                     Ui.Item(m.Items, hz + " Hz", Result.RefreshRate == hz, delegate { Result.RefreshRate = v; Later(); });
                 }
             return m;
-        }));
+        }, S(200)));
 
         card.AddRow("缩放", "和 Windows 显示设置里的缩放相同", Drop(Result.Scale > 0 ? Result.Scale + "%" : "不改", delegate
         {
@@ -706,7 +845,7 @@ class ProfileEditor : Form, IKeyCapture
                 Ui.Item(m.Items, pct + "%", Result.Scale == pct, delegate { Result.Scale = v; Later(); });
             }
             return m;
-        }));
+        }, S(200)));
 
         var key = new RoundButton(capturing ? "请按下按键…" : Result.HotkeyVk == 0 ? "未设置" : KeyCombo.Name(Result.HotkeyMods, Result.HotkeyVk)) { Highlight = capturing };
         key.FitWidth(S(200));
@@ -722,7 +861,23 @@ class ProfileEditor : Form, IKeyCapture
 
         card.Location = new Point(x, y);
         Controls.Add(card);
-        y += card.Height + S(20);
+        y += card.Height + S(16);
+
+        // 自动切换: 关联程序运行时切到这个模式
+        var auto = new Card(W);
+        auto.AddRow("运行这些程序时自动切换", "程序退出后切回原来的模式，比如关联游戏的 exe",
+            Drop("添加程序", delegate { return SettingsForm.ProgramPicker(Result.AutoApps, n => { Result.AutoApps.Add(n); Later(); }, this); }, S(140)));
+        foreach (var exe in Result.AutoApps)
+        {
+            string n = exe;
+            var remove = new RoundButton("移除");
+            remove.FitWidth(S(72));
+            remove.Click += delegate { Result.AutoApps.Remove(n); Later(); };
+            auto.AddRow(n + ".exe", null, remove);
+        }
+        auto.Location = new Point(x, y);
+        Controls.Add(auto);
+        y += auto.Height + S(20);
 
         var cancel = new RoundButton("取消");
         cancel.FitWidth(S(96));
@@ -755,6 +910,9 @@ class ProfileEditor : Form, IKeyCapture
             Build();
             return;
         }
+        // 分辨率或刷新率改过, 下次切换时重新确认能否正常显示
+        if (original == null || original.Width != Result.Width || original.Height != Result.Height || original.RefreshRate != Result.RefreshRate)
+            Result.Verified = false;
         DialogResult = DialogResult.OK;
         Close();
     }
@@ -770,6 +928,8 @@ class ProfileEditor : Form, IKeyCapture
         else
         {
             string err = KeyCombo.Validate(mods, vk);
+            string owner = err == null ? app.HotkeyOwner(mods, vk, null, original) : null;
+            if (owner != null) err = "这个快捷键已被「" + owner + "」使用，请换一个。";
             if (err != null)
             {
                 hint = err;
