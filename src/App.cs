@@ -20,11 +20,12 @@ interface IKeyCapture
 
 class App : ApplicationContext
 {
-    public const string Version = "0.3.1";
-    public const string Repo = "czczccc/OledGuard";
+    public const string Version = "1.0.0";
+    public const string Repo = "czczccc/DisplayKit";
     public static string RepoUrl { get { return "https://github.com/" + Repo; } }
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    const string RunValue = "OledGuard";
+    const string RunValue = "DisplayKit";
+    const string LegacyRunValue = "OledGuard"; // 改名前的自启项
     const int GraceMs = 800; // 黑屏后这段时间内忽略输入(比如松开快捷键)
 
     readonly Settings cfg = Settings.Load();
@@ -120,8 +121,18 @@ class App : ApplicationContext
         SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         SystemEvents.SessionSwitch += OnSessionSwitch;
 
+        MigrateAutoStart();
         if (IsAutoStart()) SetAutoStart(true); // exe 换过位置时更新自启路径
         RefreshDisplay();
+
+        // 旧版 OledGuard 还在运行的话, 两边的键盘钩子会抢同一组快捷键
+        Mutex legacy;
+        if (Mutex.TryOpenExisting(@"Local\OledGuard_SingleInstance", out legacy))
+        {
+            legacy.Dispose();
+            Log.Write("检测到旧版 OledGuard 正在运行");
+            tray.ShowBalloon("旧版 OledGuard 还在运行", "DisplayKit 已包含它的全部功能，请右键 OledGuard 的托盘图标退出它", TrayIcon.InfoWarning);
+        }
 
         timer.Interval = 500;
         timer.Tick += delegate { Tick(); };
@@ -431,7 +442,7 @@ class App : ApplicationContext
         }
 
         tray.Icon = paused ? iconPaused : iconActive;
-        string tip = "OledGuard\n防烧屏：" + guardStatus;
+        string tip = "DisplayKit\n防烧屏：" + guardStatus;
         if (display != null) tip += "\n显示：" + (profileIndex >= 0 ? cfg.Profiles[profileIndex].Name + " · " : "") + display.Describe();
         if (tip != lastTip) { tray.Text = tip; lastTip = tip; }
 
@@ -626,7 +637,7 @@ class App : ApplicationContext
                 using (var wc = new WebClient())
                 {
                     wc.Encoding = Encoding.UTF8;
-                    wc.Headers.Add("User-Agent", "OledGuard/" + Version);
+                    wc.Headers.Add("User-Agent", "DisplayKit/" + Version);
                     string json = wc.DownloadString("https://api.github.com/repos/" + Repo + "/releases/latest");
                     var m = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"");
                     if (m.Success) tag = m.Groups[1].Value;
@@ -651,7 +662,7 @@ class App : ApplicationContext
             bool first = latestVersion != tag;
             latestVersion = tag;
             updateStatus = "发现新版本 v" + tag;
-            if (first) tray.ShowBalloon("OledGuard 有新版本 v" + tag, "点击这里打开下载页面", TrayIcon.InfoInfo);
+            if (first) tray.ShowBalloon("DisplayKit 有新版本 v" + tag, "点击这里打开下载页面", TrayIcon.InfoInfo);
         }
         else
         {
@@ -780,6 +791,22 @@ class App : ApplicationContext
         m.Items.Add(Ui.Separator());
         Ui.Item(m.Items, "设置…", false, delegate { OpenSettings(); });
         Ui.Item(m.Items, "退出", false, delegate { ExitThread(); });
+    }
+
+    // 以前设置过 OledGuard 开机自启的, 换成 DisplayKit
+    static void MigrateAutoStart()
+    {
+        try
+        {
+            using (var k = Registry.CurrentUser.OpenSubKey(RunKey, true))
+            {
+                if (k == null || k.GetValue(LegacyRunValue) == null) return;
+                k.DeleteValue(LegacyRunValue, false);
+            }
+            SetAutoStart(true);
+            Log.Write("已把 OledGuard 的开机自启换成 DisplayKit");
+        }
+        catch (Exception ex) { Log.Write("迁移开机自启失败: " + ex.Message); }
     }
 
     public static bool IsAutoStart()

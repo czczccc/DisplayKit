@@ -1,4 +1,4 @@
-// OledGuard: OLED 防烧屏 + 显示模式切换
+// DisplayKit: OLED 防烧屏 + 显示模式切换
 // 编译: build.bat (使用 Windows 自带的 .NET Framework 4 csc.exe, 无需安装任何东西)
 using System;
 using System.Collections.Generic;
@@ -8,7 +8,7 @@ using System.Windows.Forms;
 static class Program
 {
     // 不带参数: 常驻托盘
-    // 带模式名: 直接切换后退出, 方便做成桌面快捷方式, 例如 OledGuard.exe 游戏 / OledGuard.exe --toggle
+    // 带模式名: 直接切换后退出, 方便做成桌面快捷方式, 例如 DisplayKit.exe 游戏 / DisplayKit.exe --toggle
     [STAThread]
     static int Main(string[] args)
     {
@@ -26,8 +26,8 @@ static class Program
         if (command != null) return RunCommand(command);
 
         bool created;
-        using (var showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\OledGuard_Show"))
-        using (var mutex = new Mutex(true, @"Local\OledGuard_SingleInstance", out created))
+        using (var showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\DisplayKit_Show"))
+        using (var mutex = new Mutex(true, @"Local\DisplayKit_SingleInstance", out created))
         {
             if (!created)
             {
@@ -48,7 +48,7 @@ static class Program
         try
         {
             var cfg = Settings.Load();
-            if (cfg.Profiles.Count == 0) throw new InvalidOperationException("还没有设置显示模式，请先运行 OledGuard 在「显示模式」里添加。");
+            if (cfg.Profiles.Count == 0) throw new InvalidOperationException("还没有设置显示模式，请先运行 DisplayKit 在「显示模式」里添加。");
             string device = DisplayController.ResolveDevice(cfg.DisplayDevice);
 
             DisplayProfile target;
@@ -73,7 +73,7 @@ static class Program
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "OledGuard", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(ex.Message, "DisplayKit", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
         }
     }

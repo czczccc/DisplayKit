@@ -1,4 +1,4 @@
-# OledGuard
+# DisplayKit
 
 A Windows tray utility for OLED monitors that does two jobs:
 
@@ -12,11 +12,13 @@ Windows 下的 OLED 显示器托盘工具，两个功能合二为一：
 
 界面为 Windows 11 风格，跟随系统深色/浅色模式。
 
+> 本项目由 [OledGuard](https://github.com/czczccc/OledGuard) 和 [DisplayModeSwitch](https://github.com/czczccc/DisplayModeSwitch) 合并改名而来。从 OledGuard 升级时，设置和开机自启会自动迁移，记得先退出旧版。
+
 ## 下载
 
-到 [Releases](https://github.com/czczccc/OledGuard/releases/latest) 下载 `OledGuard.exe`，直接运行即可（单文件、无需安装，Windows 10/11 自带所需的 .NET Framework 4.8）。
+到 [Releases](https://github.com/czczccc/DisplayKit/releases/latest) 下载 `DisplayKit.exe`，直接运行即可（单文件、无需安装，Windows 10/11 自带所需的 .NET Framework 4.8）。
 
-程序没有数字签名，首次运行时 SmartScreen 可能拦截：点"更多信息" → "仍要运行"。建议把 exe 放到固定位置（如 `%LOCALAPPDATA%\Programs\OledGuard\`）后再打开"开机自启动"。
+程序没有数字签名，首次运行时 SmartScreen 可能拦截：点"更多信息" → "仍要运行"。建议把 exe 放到固定位置（如 `%LOCALAPPDATA%\Programs\DisplayKit\`）后再打开"开机自启动"。
 
 ## 使用
 
@@ -48,8 +50,8 @@ Windows 下的 OLED 显示器托盘工具，两个功能合二为一：
 - 命令行（切完就退出，适合做桌面快捷方式或给游戏启动器用）：
 
   ```
-  OledGuard.exe 游戏
-  OledGuard.exe --toggle
+  DisplayKit.exe 游戏
+  DisplayKit.exe --toggle
   ```
 
 所有快捷键都由程序自己的键盘钩子处理，不会被其他程序抢占。
@@ -67,7 +69,7 @@ Windows 下的 OLED 显示器托盘工具，两个功能合二为一：
 build.bat
 ```
 
-生成的程序在 `%LOCALAPPDATA%\Programs\OledGuard\OledGuard.exe`。
+生成的程序在 `%LOCALAPPDATA%\Programs\DisplayKit\DisplayKit.exe`。
 
 > 如果源码所在文件夹带有低完整性标签（某些沙箱工具会设置），直接放在那里的 exe 会以低权限运行，导致托盘图标不显示、键鼠拦截失效，所以 `build.bat` 会输出到上面的目录。
 
@@ -76,13 +78,13 @@ build.bat
 推送 `v` 开头的标签，GitHub Actions 会自动编译并创建 Release：
 
 ```bat
-git tag v0.3.0
-git push origin v0.3.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
 ## 配置
 
-设置保存在 `%APPDATA%\OledGuard\config.ini`，日志在同目录的 `log.txt`。
+设置保存在 `%APPDATA%\DisplayKit\config.ini`，日志在同目录的 `log.txt`。
 
 ## 原理
 

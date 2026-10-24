@@ -249,8 +249,23 @@ class Settings
     public int ToggleVk, ToggleMods;    // 在模式间循环切换
     public List<DisplayProfile> Profiles = new List<DisplayProfile>();
 
-    public static string Dir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OledGuard"); } }
+    public static string Dir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DisplayKit"); } }
     public static string FilePath { get { return Path.Combine(Dir, "config.ini"); } }
+    static string LegacyDir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OledGuard"); } }
+
+    // 本程序以前叫 OledGuard: 第一次运行时把旧的配置搬过来
+    static void MigrateFromOledGuard()
+    {
+        try
+        {
+            string old = Path.Combine(LegacyDir, "config.ini");
+            if (File.Exists(FilePath) || !File.Exists(old)) return;
+            Directory.CreateDirectory(Dir);
+            File.Copy(old, FilePath);
+            Log.Write("已从 OledGuard 迁移配置");
+        }
+        catch (Exception ex) { Log.Write("迁移 OledGuard 配置失败: " + ex.Message); }
+    }
 
     public DisplayProfile FindProfile(string name)
     {
@@ -279,6 +294,7 @@ class Settings
     {
         var s = new Settings();
         bool sawDisplay = false;
+        MigrateFromOledGuard();
         try
         {
             if (!File.Exists(FilePath)) { s.AddBuiltInsOnFirstRun(); return s; }
@@ -371,7 +387,7 @@ class Settings
         {
             Directory.CreateDirectory(Dir);
             var sb = new StringBuilder();
-            sb.AppendLine("; OledGuard 配置文件, 一般在设置窗口里修改即可");
+            sb.AppendLine("; DisplayKit 配置文件, 一般在设置窗口里修改即可");
             sb.AppendLine("[Guard]");
             sb.AppendLine("TimeoutSec=" + TimeoutSec);
             sb.AppendLine("MoveThreshold=" + MoveThreshold);

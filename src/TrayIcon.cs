@@ -37,7 +37,7 @@ class TrayIcon : NativeWindow
     static readonly int TaskbarCreated = RegisterWindowMessage("TaskbarCreated");
 
     Icon icon;
-    string tip = "OledGuard";
+    string tip = "DisplayKit";
     public bool Added { get; private set; }
     public ContextMenuStrip Menu;
     public event Action LeftClick, BalloonClick;

@@ -35,7 +35,7 @@ class SettingsForm : Form, IKeyCapture
     public SettingsForm(App app)
     {
         this.app = app;
-        Text = "OledGuard";
+        Text = "DisplayKit";
         Icon = app.AppIcon;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
@@ -118,7 +118,7 @@ class SettingsForm : Form, IKeyCapture
         foreach (var c in old) c.Dispose();
         navButtons.Clear();
 
-        var logo = Ui.Text("OledGuard", Theme.Header, Theme.Text, Theme.Bg);
+        var logo = Ui.Text("DisplayKit", Theme.Header, Theme.Text, Theme.Bg);
         logo.Bounds = new Rectangle(S(22), S(18), nav.Width - S(30), S(28));
         nav.Controls.Add(logo);
         var ver = Ui.Text("v" + App.Version + " · 防烧屏 + 显示模式", Theme.Small, Theme.SubText, Theme.Bg);
@@ -589,7 +589,7 @@ class SettingsForm : Form, IKeyCapture
         import.Location = new Point(add.Right + S(8), y - S(12));
         content.Controls.Add(import);
         y += S(36);
-        y += AddWrapped("也可以用命令行切换：OledGuard.exe <模式名> 或 OledGuard.exe --toggle，适合做成桌面快捷方式或给游戏启动器用。", Theme.Small, Theme.SubText, y).Height;
+        y += AddWrapped("也可以用命令行切换：DisplayKit.exe <模式名> 或 DisplayKit.exe --toggle，适合做成桌面快捷方式或给游戏启动器用。", Theme.Small, Theme.SubText, y).Height;
         return y;
     }
 
@@ -648,7 +648,7 @@ class SettingsForm : Form, IKeyCapture
     void DeleteProfile(int idx)
     {
         var p = app.Cfg.Profiles[idx];
-        if (MessageBox.Show(this, "删除模式「" + p.Name + "」？", "OledGuard", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        if (MessageBox.Show(this, "删除模式「" + p.Name + "」？", "DisplayKit", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         app.Cfg.Profiles.RemoveAt(idx);
         Changed();
     }
@@ -663,7 +663,7 @@ class SettingsForm : Form, IKeyCapture
                 int n = app.Cfg.ImportDisplayModeSwitch(ofd.FileName);
                 app.Save();
                 Rebuild();
-                MessageBox.Show(this, "已导入 " + n + " 个模式。", "OledGuard", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, "已导入 " + n + " 个模式。", "DisplayKit", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
@@ -706,7 +706,7 @@ class SettingsForm : Form, IKeyCapture
         {
             var check = Button(app.UpdateChecking ? "检查中…" : "检查更新", false, delegate { app.CheckForUpdate(true); Later(); });
             check.Enabled = !app.UpdateChecking;
-            c2.AddRow("OledGuard v" + App.Version, app.UpdateStatus ?? "OLED 防烧屏 + 显示模式切换", check);
+            c2.AddRow("DisplayKit v" + App.Version, app.UpdateStatus ?? "OLED 防烧屏 + 显示模式切换", check);
         }
         y = Section("更新", c2, y);
 
