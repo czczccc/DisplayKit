@@ -695,12 +695,16 @@ class SettingsForm : Form, IKeyCapture
 
         var cfg = app.Cfg;
         var c2 = new Card(W);
-        c2.AddRow("自动检查更新", "每天检查一次 GitHub 上的新版本，有更新时在托盘提醒", Switch(cfg.CheckUpdates, v => cfg.CheckUpdates = v));
+        c2.AddRow("自动检查更新", "每天检查一次 GitHub 上的新版本", Switch(cfg.CheckUpdates, v => { cfg.CheckUpdates = v; Later(); }));
+        if (cfg.CheckUpdates)
+            c2.AddRow("自动安装更新", "发现新版本后在你不操作电脑时自动下载并重启，设置保持不变", Switch(cfg.AutoInstallUpdates, v => cfg.AutoInstallUpdates = v));
         if (app.LatestVersion != null)
         {
-            var t = c2.AddRow("发现新版本 v" + app.LatestVersion, "当前版本 v" + App.Version + "，下载后替换现在的 exe 即可",
-                Button("下载", true, delegate { App.OpenUrl(App.RepoUrl + "/releases/latest"); }));
+            var install = Button(app.Updating ? "更新中…" : "立即更新", true, delegate { app.InstallUpdate(); Later(); });
+            install.Enabled = !app.Updating;
+            var t = c2.AddRow("发现新版本 v" + app.LatestVersion, app.Updating || (app.UpdateStatus ?? "").StartsWith("更新失败") ? app.UpdateStatus : "当前版本 v" + App.Version, install);
             t.ForeColor = Theme.Accent;
+            c2.AddRow("更新内容", "在 GitHub 上查看这个版本改了什么", Button("查看", false, delegate { App.OpenUrl(App.RepoUrl + "/releases/latest"); }));
         }
         else
         {

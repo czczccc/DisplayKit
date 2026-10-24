@@ -1,0 +1,16 @@
+name: Build
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        shell: cmd
+        run: '"%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /codepage:65001 /optimize /warn:4 /warnaserror /target:winexe /win32manifest:src\app.manifest /win32icon:src\app.ico /out:DisplayKit.exe /r:System.Windows.Forms.dll /r:System.Drawing.dll src\*.cs'

@@ -142,7 +142,7 @@ static class DisplayController
         var current = Native.DEVMODE.Create();
         if (Native.EnumDisplaySettings(device, Native.ENUM_CURRENT_SETTINGS, ref current)
             && current.dmPelsWidth == width && current.dmPelsHeight == height
-            && (refreshRate <= 0 || current.dmDisplayFrequency == refreshRate))
+            && (refreshRate <= 0 || Math.Abs(current.dmDisplayFrequency - refreshRate) <= 1)) // 59/60Hz 视为相同, 和 Matches 一致
             return;
 
         var dm = Native.DEVMODE.Create();

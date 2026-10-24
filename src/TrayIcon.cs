@@ -40,7 +40,9 @@ class TrayIcon : NativeWindow
     string tip = "DisplayKit";
     public bool Added { get; private set; }
     public ContextMenuStrip Menu;
-    public event Action LeftClick, BalloonClick;
+    public event Action LeftClick;
+    public event Action<string> BalloonClick; // 参数是最近一条通知的 tag
+    string balloonTag;
 
     public TrayIcon() { CreateHandle(new CreateParams()); }
 
@@ -96,9 +98,10 @@ class TrayIcon : NativeWindow
     }
 
     // Windows 11 上显示为系统通知
-    public void ShowBalloon(string title, string text, int kind)
+    public void ShowBalloon(string title, string text, int kind, string tag = null)
     {
         if (!Added) return;
+        balloonTag = tag;
         var d = Data();
         d.uFlags = NIF_INFO;
         d.szInfoTitle = title.Length > 63 ? title.Substring(0, 63) : title;
@@ -127,7 +130,7 @@ class TrayIcon : NativeWindow
             int ev = m.LParam.ToInt32() & 0xFFFF;
             if (ev == 0x202 && LeftClick != null) LeftClick(); // 左键: 打开设置
             else if (ev == 0x205) ShowMenu();                   // 右键: 菜单
-            else if (ev == 0x405 && BalloonClick != null) BalloonClick(); // 点击了通知
+            else if (ev == 0x405 && BalloonClick != null) BalloonClick(balloonTag); // 点击了通知
         }
         else if (m.Msg == TaskbarCreated && TaskbarCreated != 0)
         {

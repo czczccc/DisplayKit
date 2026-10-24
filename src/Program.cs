@@ -16,18 +16,35 @@ static class Program
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
-        bool autostart = false;
-        string command = null;
+        bool autostart = false, updated = false;
+        var commands = new List<string>();
         foreach (var a in args)
         {
             if (a == "--autostart") autostart = true;
-            else if (command == null) command = a;
+            else if (a == "--updated") updated = true; // 自动更新后由旧版本启动
+            else if (a == "--help" || a == "-h" || a == "/?")
+            {
+                MessageBox.Show(Usage, "DisplayKit", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return 0;
+            }
+            else commands.Add(a);
         }
-        if (command != null) return RunCommand(command);
+        if (commands.Count > 0)
+        {
+            string error = null;
+            if (commands.Count > 1) error = "参数太多。模式名带空格时请用引号括起来，例如 DisplayKit.exe \"模式 1\"。";
+            else if (commands[0].StartsWith("-") && commands[0] != "--toggle" && commands[0] != "-t") error = "不认识的参数：" + commands[0];
+            if (error != null)
+            {
+                MessageBox.Show(error + "\n\n" + Usage, "DisplayKit", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return 2;
+            }
+            return RunCommand(commands[0]);
+        }
 
         bool created;
         using (var showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\DisplayKit_Show"))
-        using (var mutex = new Mutex(true, @"Local\DisplayKit_SingleInstance", out created))
+        using (var mutex = AcquireInstance(updated, out created))
         {
             if (!created)
             {
@@ -38,10 +55,29 @@ static class Program
             }
             Application.ThreadException += (s, e) => Log.Write("异常: " + e.Exception);
             AppDomain.CurrentDomain.UnhandledException += (s, e) => Log.Write("未处理异常: " + e.ExceptionObject);
-            Application.Run(new App(autostart, showSignal));
+            Application.Run(new App(autostart, updated, showSignal));
         }
         return 0;
     }
+
+    // 单实例锁. 自动更新时旧版本还在退出中, 最多等它 15 秒
+    static Mutex AcquireInstance(bool wait, out bool created)
+    {
+        for (int i = 0; ; i++)
+        {
+            var mutex = new Mutex(true, @"Local\DisplayKit_SingleInstance", out created);
+            if (created || !wait || i >= 75) return mutex;
+            mutex.Dispose();
+            Thread.Sleep(200);
+        }
+    }
+
+    const string Usage =
+        "用法：\n" +
+        "  DisplayKit.exe            常驻托盘\n" +
+        "  DisplayKit.exe 模式名     切换到指定模式后退出\n" +
+        "  DisplayKit.exe --toggle   切换到下一个模式后退出\n" +
+        "  DisplayKit.exe --help     显示本说明";
 
     static int RunCommand(string arg)
     {

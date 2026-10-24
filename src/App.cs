@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -26,6 +27,7 @@ class App : ApplicationContext
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     const string RunValue = "DisplayKit";
     const string LegacyRunValue = "OledGuard"; // 改名前的自启项
+    static readonly string ExePath = Application.ExecutablePath; // 自动更新会改名正在运行的 exe, 先记下原路径
     const int GraceMs = 800; // 黑屏后这段时间内忽略输入(比如松开快捷键)
 
     readonly Settings cfg = Settings.Load();
@@ -38,16 +40,22 @@ class App : ApplicationContext
     readonly Native.HookProc mouseProc, keyProc; // 保持引用, 防止被 GC
     readonly int selfPid = Process.GetCurrentProcess().Id;
     IntPtr mouseHook, keyHook;
+    Thread hookThread;
+    uint hookThreadId;
     Icon iconActive, iconPaused;
     bool taskbarLight;
     int lastTrayTry = Environment.TickCount;
 
-    // 防烧屏状态 (只在 UI 线程, 含钩子回调, 访问)
-    int lastActivity = Environment.TickCount; // 最后一次"有效"操作
-    int lastRawInput = Environment.TickCount; // 最后一次任何输入(含抖动)
-    int anchorX, anchorY;
-    bool overlayVisible, dismissQueued;
-    int overlayShownAt, monitorOffAt;
+    // 防烧屏状态. 键鼠钩子跑在单独的线程上 (见 StartHooks), 两边都访问的字段标为 volatile;
+    // 钩子线程只读快照 hooks / blankRects, 不碰 cfg 里的列表
+    volatile int lastActivity = Environment.TickCount; // 最后一次"有效"操作
+    volatile int lastRawInput = Environment.TickCount; // 最后一次任何输入(含抖动)
+    volatile int anchorX, anchorY;
+    volatile bool overlayVisible, dismissQueued;
+    volatile int overlayShownAt;
+    volatile HookConfig hooks;
+    volatile Rectangle[] blankRects; // 只黑部分显示器时被黑掉的区域, null = 全部
+    int monitorOffAt;
     bool monitorOffSent;
     DateTime pausedUntil = DateTime.MinValue;
     readonly HashSet<int> swallowMouseUp = new HashSet<int>();
@@ -67,12 +75,13 @@ class App : ApplicationContext
 
     // 检查更新
     DateTime nextUpdateCheck = DateTime.Now.AddSeconds(15);
-    string latestVersion, updateStatus;
-    bool updateChecking;
+    string latestVersion, latestUrl, updateStatus;
+    bool updateChecking, updating, autoInstallPending;
+    string autoInstallFailed; // 自动安装失败过的版本, 不再自动重试
     Icon formIcon;
 
     SettingsForm settings;
-    IKeyCapture capture;
+    volatile IKeyCapture capture;
     int pendingModOnly; // 录入快捷键时: 只按了修饰键还没按别的键
 
     static int Since(int tick) { return unchecked(Environment.TickCount - tick); }
@@ -86,15 +95,16 @@ class App : ApplicationContext
     public string LatestVersion { get { return latestVersion; } }
     public string UpdateStatus { get { return updateStatus; } }
     public bool UpdateChecking { get { return updateChecking; } }
+    public bool Updating { get { return updating; } }
     public bool Paused { get { return DateTime.Now < pausedUntil; } }
     public DateTime PausedUntil { get { return pausedUntil; } }
     public IKeyCapture Capture { get { return capture; } set { capture = value; pendingModOnly = 0; } }
 
-    public App(bool autostart, EventWaitHandle showSignal)
+    public App(bool autostart, bool updated, EventWaitHandle showSignal)
     {
         var h = invoker.Handle; // 强制创建句柄, 供 BeginInvoke 使用
         var p = Cursor.Position; anchorX = p.X; anchorY = p.Y;
-        Log.Write("启动 v" + Version + (autostart ? " (开机自启)" : ""));
+        Log.Write("启动 v" + Version + (autostart ? " (开机自启)" : "") + (updated ? " (自动更新后)" : ""));
 
         Theme.Load();
         ToolStripManager.Renderer = new ModernRenderer();
@@ -104,7 +114,7 @@ class App : ApplicationContext
         tray.Menu = Ui.Menu();
         tray.Menu.Opening += (s, e) => { FillTrayMenu(); e.Cancel = false; };
         tray.LeftClick += OpenSettings;
-        tray.BalloonClick += delegate { if (latestVersion != null) OpenUrl(RepoUrl + "/releases/latest"); };
+        tray.BalloonClick += tag => { if (tag == "update") InstallUpdate(); };
         tray.TryAdd();
 
         // 再次运行 exe 时, 新进程会发信号让这里打开设置窗口
@@ -112,10 +122,8 @@ class App : ApplicationContext
 
         mouseProc = MouseHook;
         keyProc = KeyHook;
-        IntPtr mod = Native.GetModuleHandle(null);
-        mouseHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, mouseProc, mod, 0);
-        keyHook = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, keyProc, mod, 0);
-        if (mouseHook == IntPtr.Zero || keyHook == IntPtr.Zero) Log.Write("安装键鼠钩子失败, 错误码 " + Marshal.GetLastWin32Error());
+        RebuildHooks();
+        StartHooks();
 
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
@@ -139,120 +147,223 @@ class App : ApplicationContext
         timer.Start();
         Tick();
 
+        if (updated)
+        {
+            tray.ShowBalloon("DisplayKit 已更新到 v" + Version, "设置和开机自启都保持不变", TrayIcon.InfoInfo);
+            DeleteOldExe();
+        }
         if (!autostart) OpenSettings();
     }
 
     // ---------- 输入钩子 ----------
 
-    bool WakeByMouse { get { return cfg.WakeMode == Settings.WakeAny; } }
+    // 钩子线程用的设置快照: 设置窗口改 cfg 时钩子线程可能正在遍历, 所以每次保存后整体换一份
+    class HookConfig
+    {
+        public int WakeMode, WakeVk, WakeMods, MoveThreshold;
+        public int[] Vks, Mods;
+        public Action[] Actions;
+    }
 
+    void RebuildHooks()
+    {
+        var vks = new List<int>(); var mods = new List<int>(); var actions = new List<Action>();
+        vks.Add(cfg.BlankVk); mods.Add(cfg.BlankMods); actions.Add(ShowOverlay);
+        if (cfg.Profiles.Count > 0) { vks.Add(cfg.ToggleVk); mods.Add(cfg.ToggleMods); actions.Add(ToggleProfile); }
+        foreach (var p in cfg.Profiles)
+        {
+            var profile = p;
+            vks.Add(p.HotkeyVk); mods.Add(p.HotkeyMods); actions.Add(delegate { SwitchProfile(profile, null); });
+        }
+        hooks = new HookConfig
+        {
+            WakeMode = cfg.WakeMode, WakeVk = cfg.WakeVk, WakeMods = cfg.WakeMods, MoveThreshold = cfg.MoveThreshold,
+            Vks = vks.ToArray(), Mods = mods.ToArray(), Actions = actions.ToArray(),
+        };
+    }
+
+    // 低级钩子放在单独的高优先级线程上: 回调超时 (UI 线程在切换分辨率等操作时会卡一两秒) 的钩子会被系统悄悄移除
+    void StartHooks()
+    {
+        using (var ready = new ManualResetEvent(false))
+        {
+            hookThread = new Thread(delegate ()
+            {
+                hookThreadId = Native.GetCurrentThreadId();
+                Native.MSG msg;
+                Native.PeekMessage(out msg, IntPtr.Zero, 0, 0, 0); // 建立消息队列, 之后才能收 WM_QUIT
+                IntPtr mod = Native.GetModuleHandle(null);
+                mouseHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, mouseProc, mod, 0);
+                keyHook = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, keyProc, mod, 0);
+                if (mouseHook == IntPtr.Zero || keyHook == IntPtr.Zero) Log.Write("安装键鼠钩子失败, 错误码 " + Marshal.GetLastWin32Error());
+                ready.Set();
+                while (Native.GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) { }
+                if (mouseHook != IntPtr.Zero) Native.UnhookWindowsHookEx(mouseHook);
+                if (keyHook != IntPtr.Zero) Native.UnhookWindowsHookEx(keyHook);
+            });
+            hookThread.Name = "InputHooks";
+            hookThread.IsBackground = true;
+            hookThread.Priority = ThreadPriority.Highest;
+            hookThread.Start();
+            ready.WaitOne();
+        }
+    }
+
+    void StopHooks()
+    {
+        if (hookThread == null) return;
+        Native.PostThreadMessage(hookThreadId, Native.WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+        hookThread.Join(1000);
+        hookThread = null;
+    }
+
+    bool WakeByMouse { get { return hooks.WakeMode == Settings.WakeAny; } }
+
+    // 只黑部分显示器时, 落在没黑的屏幕上的输入照常放行
+    bool OnBlankedScreen(int x, int y)
+    {
+        var rects = blankRects;
+        if (rects == null) return true;
+        foreach (var r in rects)
+            if (r.Contains(x, y)) return true;
+        return false;
+    }
+
+    bool ForegroundOnBlankedScreen()
+    {
+        if (blankRects == null) return true;
+        Native.RECT r;
+        IntPtr hwnd = Native.GetForegroundWindow();
+        if (hwnd == IntPtr.Zero || !Native.GetWindowRect(hwnd, out r)) return true;
+        return OnBlankedScreen((r.Left + r.Right) / 2, (r.Top + r.Bottom) / 2);
+    }
+
+    // 钩子线程上的异常没人接, 会直接让进程退出
     IntPtr MouseHook(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0)
+        try
         {
-            int msg = wParam.ToInt32();
-            int x = Marshal.ReadInt32(lParam, 0), y = Marshal.ReadInt32(lParam, 4);
-            lastRawInput = Environment.TickCount;
-
-            bool meaningful = false, isPress = false;
-            if (msg == Native.WM_MOUSEMOVE)
-            {
-                long dx = x - anchorX, dy = y - anchorY, t = cfg.MoveThreshold;
-                meaningful = dx * dx + dy * dy > t * t;
-            }
-            else if (msg == 0x201 || msg == 0x204 || msg == 0x207 || msg == 0x20B)
-            {
-                meaningful = isPress = true;
-            }
-            else if (msg == Native.WM_MOUSEWHEEL || msg == Native.WM_MOUSEHWHEEL)
-            {
-                meaningful = true;
-            }
-            else if (swallowMouseUp.Remove(msg))
-            {
-                return new IntPtr(1); // 吞掉被拦截点击对应的抬起
-            }
-
-            if (overlayVisible)
-            {
-                if (meaningful) { anchorX = x; anchorY = y; }
-                if (msg == Native.WM_MOUSEMOVE)
-                {
-                    if (meaningful && WakeByMouse && Since(overlayShownAt) >= GraceMs) QueueDismiss();
-                }
-                else if (meaningful)
-                {
-                    // 黑屏期间的点击/滚轮一律不传给下面的程序, 防止误操作
-                    if (WakeByMouse && Since(overlayShownAt) >= GraceMs) QueueDismiss();
-                    if (isPress) swallowMouseUp.Add(msg + 1);
-                    return new IntPtr(1);
-                }
-            }
-            else if (meaningful)
-            {
-                anchorX = x; anchorY = y;
-                lastActivity = Environment.TickCount;
-            }
+            if (nCode >= 0 && HandleMouse(wParam.ToInt32(), lParam)) return new IntPtr(1);
         }
+        catch (Exception ex) { Log.Write("鼠标钩子异常: " + ex); }
         return Native.CallNextHookEx(mouseHook, nCode, wParam, lParam);
     }
 
     IntPtr KeyHook(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0)
+        try
         {
-            int msg = wParam.ToInt32();
-            int vk = Marshal.ReadInt32(lParam, 0);
-            lastRawInput = Environment.TickCount;
-            bool down = msg == Native.WM_KEYDOWN || msg == Native.WM_SYSKEYDOWN;
-            bool isMod = KeyCombo.IsModifier(vk);
+            if (nCode >= 0 && HandleKey(wParam.ToInt32(), lParam)) return new IntPtr(1);
+        }
+        catch (Exception ex) { Log.Write("键盘钩子异常: " + ex); }
+        return Native.CallNextHookEx(keyHook, nCode, wParam, lParam);
+    }
 
-            if (capture != null && capture.IsCapturing && !overlayVisible)
+    // 返回 true 表示吞掉这次输入
+    bool HandleMouse(int msg, IntPtr lParam)
+    {
+        int x = Marshal.ReadInt32(lParam, 0), y = Marshal.ReadInt32(lParam, 4);
+        lastRawInput = Environment.TickCount;
+
+        bool meaningful = false, isPress = false;
+        if (msg == Native.WM_MOUSEMOVE)
+        {
+            long dx = x - anchorX, dy = y - anchorY, t = hooks.MoveThreshold;
+            meaningful = dx * dx + dy * dy > t * t;
+        }
+        else if (msg == 0x201 || msg == 0x204 || msg == 0x207 || msg == 0x20B)
+        {
+            meaningful = isPress = true;
+        }
+        else if (msg == Native.WM_MOUSEWHEEL || msg == Native.WM_MOUSEHWHEEL)
+        {
+            meaningful = true;
+        }
+        else if (swallowMouseUp.Remove(msg))
+        {
+            return true; // 吞掉被拦截点击对应的抬起
+        }
+
+        if (overlayVisible)
+        {
+            if (meaningful) { anchorX = x; anchorY = y; }
+            if (msg == Native.WM_MOUSEMOVE)
             {
-                // 录入快捷键: 按下普通键时连同已按住的修饰键一起记录; 单独按下并松开修饰键则记录该修饰键
-                var target = capture;
-                if (down && !isMod)
-                {
-                    int mods = KeyCombo.CurrentMods(vk), v = KeyCombo.Normalize(vk);
-                    pendingModOnly = 0;
-                    invoker.BeginInvoke((Action)delegate { if (capture == target && target.IsCapturing) target.OnCaptured(mods, v); });
-                    swallowKeyUp.Add(vk);
-                    return new IntPtr(1);
-                }
-                if (down && isMod) pendingModOnly = KeyCombo.Normalize(vk);
-                else if (!down && isMod && pendingModOnly == KeyCombo.Normalize(vk))
-                {
-                    int mods = KeyCombo.CurrentMods(vk), v = pendingModOnly;
-                    pendingModOnly = 0;
-                    invoker.BeginInvoke((Action)delegate { if (capture == target && target.IsCapturing) target.OnCaptured(mods, v); });
-                }
-                if (!down && swallowKeyUp.Remove(vk)) return new IntPtr(1);
+                if (meaningful && WakeByMouse && Since(overlayShownAt) >= GraceMs) QueueDismiss();
             }
-            else if (!down)
+            else if (meaningful)
             {
-                if (swallowKeyUp.Remove(vk)) return new IntPtr(1);
-            }
-            else if (overlayVisible)
-            {
-                if (Since(overlayShownAt) >= GraceMs &&
-                    (cfg.WakeMode != Settings.WakeKey || KeyCombo.Matches(vk, KeyCombo.CurrentMods(vk), cfg.WakeVk, cfg.WakeMods)))
-                    QueueDismiss();
-                // 黑屏期间的按键不传给前台程序, 避免盲打误输入; 修饰键放行以免卡键/弹出开始菜单
-                if (!isMod) { swallowKeyUp.Add(vk); return new IntPtr(1); }
-            }
-            else
-            {
-                Action hotkey = isMod ? null : FindHotkey(vk, KeyCombo.CurrentMods(vk));
-                if (hotkey != null)
+                if (WakeByMouse && Since(overlayShownAt) >= GraceMs) QueueDismiss();
+                // 黑掉的屏幕上的点击/滚轮不传给下面的程序, 防止误操作
+                if (OnBlankedScreen(x, y))
                 {
-                    invoker.BeginInvoke(hotkey);
-                    swallowKeyUp.Add(vk);
-                    return new IntPtr(1);
+                    if (isPress) swallowMouseUp.Add(msg + 1);
+                    return true;
                 }
-                lastActivity = Environment.TickCount;
             }
         }
-        return Native.CallNextHookEx(keyHook, nCode, wParam, lParam);
+        else if (meaningful)
+        {
+            anchorX = x; anchorY = y;
+            lastActivity = Environment.TickCount;
+        }
+        return false;
+    }
+
+    bool HandleKey(int msg, IntPtr lParam)
+    {
+        int vk = Marshal.ReadInt32(lParam, 0);
+        lastRawInput = Environment.TickCount;
+        bool down = msg == Native.WM_KEYDOWN || msg == Native.WM_SYSKEYDOWN;
+        bool isMod = KeyCombo.IsModifier(vk);
+
+        var target = capture; // UI 线程随时可能改 capture, 只读一次
+        if (target != null && target.IsCapturing && !overlayVisible)
+        {
+            // 录入快捷键: 按下普通键时连同已按住的修饰键一起记录; 单独按下并松开修饰键则记录该修饰键
+            if (down && !isMod)
+            {
+                int mods = KeyCombo.CurrentMods(vk), v = KeyCombo.Normalize(vk);
+                pendingModOnly = 0;
+                invoker.BeginInvoke((Action)delegate { if (capture == target && target.IsCapturing) target.OnCaptured(mods, v); });
+                swallowKeyUp.Add(vk);
+                return true;
+            }
+            if (down && isMod) pendingModOnly = KeyCombo.Normalize(vk);
+            else if (!down && isMod && pendingModOnly == KeyCombo.Normalize(vk))
+            {
+                int mods = KeyCombo.CurrentMods(vk), v = pendingModOnly;
+                pendingModOnly = 0;
+                invoker.BeginInvoke((Action)delegate { if (capture == target && target.IsCapturing) target.OnCaptured(mods, v); });
+            }
+            if (!down && swallowKeyUp.Remove(vk)) return true;
+        }
+        else if (!down)
+        {
+            if (swallowKeyUp.Remove(vk)) return true;
+        }
+        else if (overlayVisible)
+        {
+            var h = hooks;
+            if (Since(overlayShownAt) >= GraceMs &&
+                (h.WakeMode != Settings.WakeKey || KeyCombo.Matches(vk, KeyCombo.CurrentMods(vk), h.WakeVk, h.WakeMods)))
+                QueueDismiss();
+            // 黑屏期间的按键不传给前台程序, 避免盲打误输入; 修饰键放行以免卡键/弹出开始菜单.
+            // 只黑部分显示器且前台窗口在没黑的屏上时照常放行
+            if (!isMod && ForegroundOnBlankedScreen()) { swallowKeyUp.Add(vk); return true; }
+        }
+        else
+        {
+            lastActivity = Environment.TickCount;
+            Action hotkey = isMod ? null : FindHotkey(vk, KeyCombo.CurrentMods(vk));
+            if (hotkey != null)
+            {
+                invoker.BeginInvoke(hotkey);
+                swallowKeyUp.Add(vk);
+                return true;
+            }
+        }
+        return false;
     }
 
     // 所有全局快捷键都在钩子里处理, 不会被其他程序抢占
@@ -268,14 +379,9 @@ class App : ApplicationContext
 
     Action FindHotkey(int vk, int mods)
     {
-        if (KeyCombo.Matches(vk, mods, cfg.BlankVk, cfg.BlankMods)) return ShowOverlay;
-        if (cfg.Profiles.Count > 0 && KeyCombo.Matches(vk, mods, cfg.ToggleVk, cfg.ToggleMods)) return ToggleProfile;
-        foreach (var p in cfg.Profiles)
-            if (KeyCombo.Matches(vk, mods, p.HotkeyVk, p.HotkeyMods))
-            {
-                var profile = p;
-                return delegate { SwitchProfile(profile, null); };
-            }
+        var h = hooks;
+        for (int i = 0; i < h.Vks.Length; i++)
+            if (KeyCombo.Matches(vk, mods, h.Vks[i], h.Mods[i])) return h.Actions[i];
         return null;
     }
 
@@ -301,14 +407,18 @@ class App : ApplicationContext
 
     void ShowOverlay()
     {
-        if (overlayVisible) return;
-        foreach (var s in BlankTargets())
+        if (overlayVisible || locked) return;
+        var targets = BlankTargets();
+        var rects = new List<Rectangle>();
+        foreach (var s in targets)
         {
             var f = new BlankForm(s.Bounds);
             f.Show();
             f.KeepOnTop();
             overlays.Add(f);
+            rects.Add(s.Bounds);
         }
+        blankRects = targets.Count < Screen.AllScreens.Length ? rects.ToArray() : null;
         var p = Cursor.Position; anchorX = p.X; anchorY = p.Y;
         overlayShownAt = Environment.TickCount;
         monitorOffSent = false;
@@ -371,6 +481,7 @@ class App : ApplicationContext
     // 返回不该黑屏的原因, null 表示可以黑屏
     string KeepAwakeReason(bool fullscreen)
     {
+        if (confirming) return "等待确认显示模式"; // 别让黑屏盖住确认框
         if (fgProcess != null && Native.GetForegroundWindow() == fgHwnd && cfg.Whitelist.Contains(fgProcess)) return "白名单：" + fgProcess;
         // 全屏应用只在它所在的显示器会被黑屏时才算 (比如游戏在另一块非 OLED 屏上就不影响)
         if (cfg.SkipFullscreen && fullscreen && BlankTargets().Exists(s => s.DeviceName == fgScreen)) return "全屏应用";
@@ -430,6 +541,9 @@ class App : ApplicationContext
             nextUpdateCheck = DateTime.Now.AddHours(24);
             CheckForUpdate(false);
         }
+        // 自动更新: 等键鼠停一会儿 (但要赶在黑屏之前) 再装, 别在打字时突然重启
+        if (autoInstallPending && !updating && SafeToRestart() && Since(lastRawInput) >= Math.Min(30, cfg.TimeoutSec / 2) * 1000)
+            InstallUpdate();
 
         if (overlayVisible) guardStatus = "黑屏中";
         else if (locked) guardStatus = "已锁屏";
@@ -495,9 +609,9 @@ class App : ApplicationContext
             before = new DisplayProfile { Name = "之前的模式", Width = s.Width, Height = s.Height, RefreshRate = s.RefreshRate, Scale = s.Scale };
             DisplayController.Apply(device, p);
 
-            // 第一次切到一个改变分辨率/刷新率的模式时让用户确认, 万一显示器没信号 15 秒后自动恢复
+            // 第一次切到一个改变分辨率/刷新率的模式时让用户确认, 万一显示器没信号 15 秒后自动恢复 (自动切换也一样)
             bool modeChanged = s.Width != p.Width || s.Height != p.Height || (p.RefreshRate > 0 && Math.Abs(s.RefreshRate - p.RefreshRate) > 1);
-            if (!p.Verified && modeChanged && autoReason == null) needConfirm = true;
+            if (!p.Verified && modeChanged) needConfirm = true;
             else if (autoReason != null) tray.ShowBalloon(autoReason + "，已切换到「" + p.Name + "」", p.Describe(), TrayIcon.InfoInfo);
             else if (owner == null) tray.ShowBalloon("已切换到「" + p.Name + "」", p.Describe(), TrayIcon.InfoInfo);
         }
@@ -537,6 +651,7 @@ class App : ApplicationContext
             cfg.Save();
             return;
         }
+        if (autoProfile == p) autoRestore = null; // 已经恢复过了, 程序退出时不用再恢复
         RestoreMode(before, "已恢复为之前的显示模式");
     }
 
@@ -607,6 +722,8 @@ class App : ApplicationContext
         {
             if (e.Reason == SessionSwitchReason.SessionLock)
             {
+                // 锁屏界面在黑屏窗口之上, 黑屏留着只会挡掉下面"锁屏后关闭显示器"的逻辑
+                HideOverlay();
                 locked = true;
                 lockedAt = Environment.TickCount;
                 lockOffSent = false;
@@ -625,31 +742,38 @@ class App : ApplicationContext
 
     public void CheckForUpdate(bool manual)
     {
-        if (updateChecking) return;
+        if (updateChecking || updating) return;
         updateChecking = true;
         updateStatus = "正在检查…";
         ThreadPool.QueueUserWorkItem(delegate
         {
-            string tag = null, error = null;
+            string tag = null, url = null, error = null;
             try
             {
-                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072; // TLS 1.2
-                using (var wc = new WebClient())
+                using (var wc = NewWebClient())
                 {
-                    wc.Encoding = Encoding.UTF8;
-                    wc.Headers.Add("User-Agent", "DisplayKit/" + Version);
                     string json = wc.DownloadString("https://api.github.com/repos/" + Repo + "/releases/latest");
                     var m = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"");
                     if (m.Success) tag = m.Groups[1].Value;
                     else error = "没有找到版本信息";
+                    var a = Regex.Match(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]+/DisplayKit\\.exe)\"", RegexOptions.IgnoreCase);
+                    if (a.Success) url = a.Groups[1].Value;
                 }
             }
             catch (Exception ex) { error = ex.Message; }
-            invoker.BeginInvoke((Action)delegate { OnUpdateChecked(tag, error, manual); });
+            invoker.BeginInvoke((Action)delegate { OnUpdateChecked(tag, url, error, manual); });
         });
     }
 
-    void OnUpdateChecked(string tag, string error, bool manual)
+    static WebClient NewWebClient()
+    {
+        ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072; // TLS 1.2
+        var wc = new WebClient { Encoding = Encoding.UTF8 };
+        wc.Headers.Add("User-Agent", "DisplayKit/" + Version);
+        return wc;
+    }
+
+    void OnUpdateChecked(string tag, string url, string error, bool manual)
     {
         updateChecking = false;
         if (error != null)
@@ -661,14 +785,108 @@ class App : ApplicationContext
         {
             bool first = latestVersion != tag;
             latestVersion = tag;
+            latestUrl = url;
             updateStatus = "发现新版本 v" + tag;
-            if (first) tray.ShowBalloon("DisplayKit 有新版本 v" + tag, "点击这里打开下载页面", TrayIcon.InfoInfo);
+            if (cfg.AutoInstallUpdates && url != null && autoInstallFailed != tag)
+            {
+                autoInstallPending = true; // 等到合适的时机 (见 Tick) 再装
+                Log.Write("发现新版本 v" + tag + ", 准备自动更新");
+            }
+            else if (first)
+                tray.ShowBalloon("DisplayKit 有新版本 v" + tag, url != null ? "点击这里立即更新" : "到 GitHub 下载新版本", TrayIcon.InfoInfo, "update");
         }
         else
         {
             updateStatus = "已是最新版本";
         }
         if (settings != null) settings.OnUpdateChecked();
+    }
+
+    // 自动安装要重启程序, 黑屏/锁屏/暂停/自动切换等状态会丢, 这些时候先不装
+    bool SafeToRestart()
+    {
+        return !overlayVisible && !locked && !Paused && !switching && !confirming && autoProfile == null
+            && (capture == null || !capture.IsCapturing);
+    }
+
+    // 下载新版本 exe, 校验版本号后替换正在运行的 exe 并重启
+    public void InstallUpdate()
+    {
+        autoInstallPending = false;
+        if (updating || latestVersion == null) return;
+        if (latestUrl == null) { OpenUrl(RepoUrl + "/releases/latest"); return; }
+        updating = true;
+        updateStatus = "正在下载 v" + latestVersion + "…";
+        if (settings != null) settings.OnUpdateChecked();
+        string tag = latestVersion, url = latestUrl, newPath = ExePath + ".new";
+        bool auto = !(settings != null && settings.Visible);
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            string error = null;
+            try
+            {
+                File.Delete(newPath);
+                using (var wc = NewWebClient()) wc.DownloadFile(url, newPath);
+                // 文件版本必须和发布标签一致, 防止下载不完整或拿错文件
+                string v = FileVersionInfo.GetVersionInfo(newPath).ProductVersion;
+                if (v != tag) throw new InvalidDataException("下载的文件版本不对（" + (v ?? "无版本信息") + "）");
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                try { File.Delete(newPath); } catch { }
+            }
+            invoker.BeginInvoke((Action)delegate { OnUpdateDownloaded(tag, newPath, error, auto); });
+        });
+    }
+
+    void OnUpdateDownloaded(string tag, string newPath, string error, bool background)
+    {
+        updating = false;
+        if (error == null)
+        {
+            // 正在运行的 exe 不能覆盖但可以改名: 旧的改成 .old, 新的放到原位置, 启动新版本后退出
+            string old = ExePath + ".old";
+            try
+            {
+                File.Delete(old);
+                File.Move(ExePath, old);
+                try { File.Move(newPath, ExePath); }
+                catch { File.Move(old, ExePath); throw; }
+                try { Process.Start(ExePath, "--updated" + (background ? " --autostart" : "")); }
+                catch { File.Move(ExePath, newPath); File.Move(old, ExePath); throw; }
+            }
+            catch (Exception ex)
+            {
+                error = ex is UnauthorizedAccessException ? "没有权限替换 " + ExePath + "，请手动下载" : ex.Message;
+                try { File.Delete(newPath); } catch { }
+            }
+        }
+        if (error != null)
+        {
+            autoInstallFailed = tag;
+            updateStatus = "更新失败：" + error;
+            Log.Write("更新到 v" + tag + " 失败: " + error);
+            tray.ShowBalloon("DisplayKit 更新失败", error, TrayIcon.InfoError);
+            if (settings != null) settings.OnUpdateChecked();
+            return;
+        }
+        Log.Write("已更新到 v" + tag + ", 重启");
+        ExitThread();
+    }
+
+    // 更新后删除旧版本 exe; 旧进程可能还没完全退出, 多试几次
+    static void DeleteOldExe()
+    {
+        string old = ExePath + ".old";
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            for (int i = 0; i < 20 && File.Exists(old); i++)
+            {
+                try { File.Delete(old); }
+                catch { Thread.Sleep(1000); }
+            }
+        });
     }
 
     static bool IsNewer(string remote, string local)
@@ -714,6 +932,7 @@ class App : ApplicationContext
     public void Save()
     {
         cfg.Save();
+        RebuildHooks();
         lastActivity = Environment.TickCount;
         RefreshDisplay();
     }
@@ -864,9 +1083,8 @@ class App : ApplicationContext
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
         SystemEvents.SessionSwitch -= OnSessionSwitch;
+        StopHooks();
         if (overlayVisible) HideOverlay();
-        if (mouseHook != IntPtr.Zero) Native.UnhookWindowsHookEx(mouseHook);
-        if (keyHook != IntPtr.Zero) Native.UnhookWindowsHookEx(keyHook);
         if (settings != null) settings.Close();
         tray.Remove();
         Log.Write("退出");

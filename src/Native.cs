@@ -15,6 +15,25 @@ static class Native
     public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
     [DllImport("kernel32.dll")]
     public static extern IntPtr GetModuleHandle(string name);
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MSG
+    {
+        public IntPtr hwnd;
+        public uint message;
+        public IntPtr wParam, lParam;
+        public uint time;
+        public POINT pt;
+    }
+    [DllImport("user32.dll")]
+    public static extern int GetMessage(out MSG msg, IntPtr hWnd, uint filterMin, uint filterMax);
+    [DllImport("user32.dll")]
+    public static extern bool PeekMessage(out MSG msg, IntPtr hWnd, uint filterMin, uint filterMax, uint remove);
+    [DllImport("user32.dll")]
+    public static extern bool PostThreadMessage(uint threadId, int msg, IntPtr wParam, IntPtr lParam);
+    public const int WM_QUIT = 0x12;
 
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();

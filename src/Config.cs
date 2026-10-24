@@ -6,17 +6,28 @@ using System.Windows.Forms;
 
 static class Log
 {
+    static readonly object sync = new object(); // 钩子线程也会写日志
+
     public static void Write(string msg)
     {
-        try
+        lock (sync)
         {
-            Directory.CreateDirectory(Settings.Dir);
-            string path = Path.Combine(Settings.Dir, "log.txt");
-            var fi = new FileInfo(path);
-            if (fi.Exists && fi.Length > 200 * 1024) fi.Delete();
-            File.AppendAllText(path, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") + msg + Environment.NewLine);
+            try
+            {
+                Directory.CreateDirectory(Settings.Dir);
+                string path = Path.Combine(Settings.Dir, "log.txt");
+                var fi = new FileInfo(path);
+                if (fi.Exists && fi.Length > 200 * 1024)
+                {
+                    // 满了就挪到 log.old.txt, 保留上一段日志
+                    string old = Path.Combine(Settings.Dir, "log.old.txt");
+                    File.Delete(old);
+                    File.Move(path, old);
+                }
+                File.AppendAllText(path, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") + msg + Environment.NewLine);
+            }
+            catch { }
         }
-        catch { }
     }
 }
 
@@ -243,6 +254,7 @@ class Settings
     public List<string> BlankDevices = new List<string>(); // 要黑屏的显示器 (\\.\DISPLAYn), 空 = 全部
     public int LockScreenOffSec = 10;   // 锁屏后多少秒关闭显示器, 0 = 不关
     public bool CheckUpdates = true;
+    public bool AutoInstallUpdates = true; // 发现新版本后自动下载并重启到新版本
 
     // ----- 显示模式 -----
     public string DisplayDevice = "";   // 留空 = 主显示器
@@ -359,6 +371,7 @@ class Settings
                 break;
             case "LockScreenOffSec": if (int.TryParse(v, out n) && n >= 0) LockScreenOffSec = n; break;
             case "CheckUpdates": CheckUpdates = v == "1"; break;
+            case "AutoInstallUpdates": AutoInstallUpdates = v == "1"; break;
         }
     }
 
@@ -402,6 +415,7 @@ class Settings
             sb.AppendLine("BlankDevices=" + string.Join("|", BlankDevices.ToArray()));
             sb.AppendLine("LockScreenOffSec=" + LockScreenOffSec);
             sb.AppendLine("CheckUpdates=" + (CheckUpdates ? "1" : "0"));
+            sb.AppendLine("AutoInstallUpdates=" + (AutoInstallUpdates ? "1" : "0"));
             sb.AppendLine();
             sb.AppendLine("[Display]");
             sb.AppendLine("Device=" + DisplayDevice);
@@ -418,7 +432,15 @@ class Settings
                 sb.AppendLine("AutoApps=" + string.Join("|", p.AutoApps.ToArray()));
                 sb.AppendLine("Verified=" + (p.Verified ? "1" : "0"));
             }
-            File.WriteAllText(FilePath, sb.ToString(), new UTF8Encoding(true));
+            // 先写临时文件再替换, 写到一半断电/崩溃也不会把原来的配置弄坏
+            string tmp = FilePath + ".tmp";
+            File.WriteAllText(tmp, sb.ToString(), new UTF8Encoding(true));
+            if (!File.Exists(FilePath)) File.Move(tmp, FilePath);
+            else
+            {
+                try { File.Replace(tmp, FilePath, null); }
+                catch (IOException) { File.Copy(tmp, FilePath, true); File.Delete(tmp); } // 个别文件系统不支持 Replace
+            }
         }
         catch (Exception ex) { Log.Write("保存配置失败: " + ex.Message); }
     }
