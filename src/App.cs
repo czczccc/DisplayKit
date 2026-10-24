@@ -21,7 +21,7 @@ interface IKeyCapture
 
 class App : ApplicationContext
 {
-    public const string Version = "1.0.0";
+    public const string Version = "1.1.0";
     public const string Repo = "czczccc/DisplayKit";
     public static string RepoUrl { get { return "https://github.com/" + Repo; } }
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
