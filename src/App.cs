@@ -20,7 +20,7 @@ interface IKeyCapture
 
 class App : ApplicationContext
 {
-    public const string Version = "0.3.0";
+    public const string Version = "0.3.1";
     public const string Repo = "czczccc/OledGuard";
     public static string RepoUrl { get { return "https://github.com/" + Repo; } }
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";

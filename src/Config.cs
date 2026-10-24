@@ -257,12 +257,31 @@ class Settings
         return Profiles.Find(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
     }
 
+    // 内置模式: 4K 办公 / 1080p 游戏 (快捷键沿用 DisplayModeSwitch 的默认值)
+    public static List<DisplayProfile> BuiltInProfiles()
+    {
+        return new List<DisplayProfile>
+        {
+            new DisplayProfile { Name = "办公", Width = 3840, Height = 2160, RefreshRate = 60, Scale = 200, HotkeyVk = (int)Keys.F10, HotkeyMods = KeyCombo.Ctrl | KeyCombo.Alt },
+            new DisplayProfile { Name = "游戏", Width = 1920, Height = 1080, RefreshRate = 240, Scale = 100, HotkeyVk = (int)Keys.F11, HotkeyMods = KeyCombo.Ctrl | KeyCombo.Alt },
+        };
+    }
+
+    // 第一次使用 (配置里还没有显示模式相关设置) 时加入内置模式
+    void AddBuiltInsOnFirstRun()
+    {
+        Profiles.AddRange(BuiltInProfiles());
+        ToggleVk = (int)Keys.F12;
+        ToggleMods = KeyCombo.Ctrl | KeyCombo.Alt;
+    }
+
     public static Settings Load()
     {
         var s = new Settings();
+        bool sawDisplay = false;
         try
         {
-            if (!File.Exists(FilePath)) return s;
+            if (!File.Exists(FilePath)) { s.AddBuiltInsOnFirstRun(); return s; }
             string section = "guard";
             DisplayProfile mode = null;
             foreach (var raw in File.ReadAllLines(FilePath, Encoding.UTF8))
@@ -279,6 +298,7 @@ class Settings
                         s.Profiles.Add(mode);
                     }
                     section = name.ToLowerInvariant();
+                    if (section == "display") sawDisplay = true;
                     continue;
                 }
                 int i = line.IndexOf('=');
@@ -289,6 +309,8 @@ class Settings
                 else s.ReadGuard(k, v); // 没有段落头的旧版配置也当作防烧屏设置
             }
             s.Profiles.RemoveAll(p => p.Width <= 0 || p.Height <= 0 || p.Name.Length == 0);
+            // 用户自己删光模式后不再自动加回来 (那时配置里已经有 [Display] 段)
+            if (!sawDisplay && s.Profiles.Count == 0) s.AddBuiltInsOnFirstRun();
         }
         catch (Exception ex) { Log.Write("读取配置失败: " + ex.Message); }
         return s;

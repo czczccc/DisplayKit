@@ -570,7 +570,19 @@ class SettingsForm : Form, IKeyCapture
         }
         y = Section("模式", c2, y);
 
-        var add = Button("添加模式", true, delegate { EditProfile(-1, NewFromCurrent()); });
+        var add = Drop("添加模式", delegate
+        {
+            var m = Ui.Menu();
+            Ui.Item(m.Items, "从当前设置添加…", false, delegate { EditProfile(-1, NewFromCurrent()); });
+            m.Items.Add(Ui.Separator());
+            foreach (var preset in Settings.BuiltInProfiles())
+            {
+                var p = preset;
+                Ui.Item(m.Items, "内置：" + p.Name + " · " + p.Describe(), false, delegate { EditProfile(-1, FromPreset(p)); });
+            }
+            return m;
+        }, S(120));
+        add.Primary = true;
         add.Location = new Point(X, y - S(12));
         content.Controls.Add(add);
         var import = Button("导入 DisplayModeSwitch 配置", false, delegate { Import(); });
@@ -591,6 +603,16 @@ class SettingsForm : Form, IKeyCapture
             string name = "模式 " + n;
             if (app.Cfg.FindProfile(name) == null) { p.Name = name; break; }
         }
+        return p;
+    }
+
+    // 内置模式: 重名时加序号, 快捷键已被占用就不带快捷键
+    DisplayProfile FromPreset(DisplayProfile p)
+    {
+        var cfg = app.Cfg;
+        string baseName = p.Name;
+        for (int n = 2; cfg.FindProfile(p.Name) != null; n++) p.Name = baseName + " " + n;
+        if (app.HotkeyOwner(p.HotkeyMods, p.HotkeyVk, null, null) != null) { p.HotkeyVk = 0; p.HotkeyMods = 0; }
         return p;
     }
 
