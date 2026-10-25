@@ -163,8 +163,22 @@ class OsdForm : Form
         hideTimer.Tick += delegate
         {
             hideTimer.Stop();
-            Anim.Run(this, "fade", (float)Opacity, 0, 250, v => Opacity = v, Hide); // 淡出后隐藏
+            Animate(0, 180, Anim.Accelerate, Hide); // 往下退出并淡出
         };
+    }
+
+    const float MaxOpacity = 0.97f;
+    int restY; // 完全显示时的位置; 出现 / 消失时在它下面一点
+
+    // shown: 0 = 隐藏 (在下方、透明), 1 = 完全显示. 分层窗口移动和改透明度都由桌面合成器完成, 不重绘
+    void Animate(float to, int ms, Func<float, float> ease, Action done = null)
+    {
+        int lift = (int)(16 * scale);
+        Anim.Run(this, "show", (float)Opacity / MaxOpacity, to, ms, ease, t =>
+        {
+            Opacity = MaxOpacity * t;
+            Top = restY + (int)Math.Round(lift * (1 - t));
+        }, done);
     }
 
     protected override bool ShowWithoutActivation { get { return true; } }
@@ -187,12 +201,14 @@ class OsdForm : Form
         var wa = screen.WorkingArea;
         scale = Math.Max(1f, Ui.DpiAt(new Point(wa.Left + wa.Width / 2, wa.Top + wa.Height / 2)) / 96f);
         Size = new Size((int)(260 * scale), (int)(56 * scale));
-        Location = new Point(wa.Left + (wa.Width - Width) / 2, wa.Bottom - Height - (int)(56 * scale));
+        restY = wa.Bottom - Height - (int)(56 * scale);
+        int x = wa.Left + (wa.Width - Width) / 2;
         using (var path = Theme.RoundRect(new RectangleF(0, 0, Width, Height), 8 * scale)) Region = new Region(path);
         BackColor = Theme.Card;
-        if (!Visible) { Opacity = 0; Show(); }
+        if (!Visible) { Opacity = 0; Location = new Point(x, restY + (int)(16 * scale)); Show(); }
+        else Left = x;
         Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0, Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
-        Anim.Run(this, "fade", (float)Opacity, 0.97f, 120, v => Opacity = v); // 淡入; 正在淡出时按快捷键会淡回来
+        Animate(1, 220, Anim.Decelerate); // 从下面滑上来并淡入; 正在退出时再按快捷键会从当前位置回来
         Invalidate();
         hideTimer.Stop();
         hideTimer.Start();

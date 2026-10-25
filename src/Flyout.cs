@@ -28,25 +28,90 @@ class Flyout : Form
     }
 
     bool closing;
+    int slide;          // 滑动方向和距离: 任务栏在下面时为正 (从下往上滑出)
+    GhostWindow ghost;  // 动画期间代替面板显示的截图
 
-    // 淡出后关闭 (点到别处、Esc、再点一次托盘图标)
+    // 动画: 真面板截一张图做成逐像素透明的分层窗口, 动画时只移动这张图 (显卡合成, 不重绘几十个控件, 不闪);
+    // 动画结束再换回真面板. 帧由 Anim 跟显示器刷新同步驱动
+
+    // 关闭: 截图替身往任务栏方向退出并淡出 (点到别处、Esc、再点一次托盘图标)
     public void FadeClose()
     {
         if (closing || IsDisposed) return;
         closing = true;
-        SetLayered(true);
-        Anim.Run(this, "show", (float)Opacity, 0, 120, v => Opacity = v, Close);
+        if (!Anim.Enabled || !Visible) { Close(); return; }
+        var pos = Location;
+        ShowGhost(pos, 1);
+        Hide(); // 真面板立刻藏起来, 由替身做退出动画
+        Anim.Run(this, "show", 0, 1, 160, Anim.Linear, t =>
+        {
+            if (ghost == null) return;
+            float e = Anim.Accelerate(t);
+            ghost.Present(pos.X, pos.Y + (int)Math.Round(slide * 0.5f * e), 1 - e);
+        }, delegate { DisposeGhost(); Close(); });
     }
 
-    // 动画期间要半透明 (分层窗口); 完全显示后去掉, Windows 11 才会给窗口加圆角和阴影
-    void SetLayered(bool on)
+    void ShowGhost(Point pos, float opacity)
     {
+        DisposeGhost();
+        int pad;
+        using (var shot = Snapshot(out pad)) ghost = new GhostWindow(shot, pad);
+        ghost.Present(pos.X, pos.Y, opacity);
+    }
+
+    void DisposeGhost()
+    {
+        if (ghost == null) return;
+        ghost.Dispose();
+        ghost = null;
+    }
+
+    // 面板截图, 加上和 Windows 11 弹出面板相近的圆角、细边框和柔和阴影 (四周留出 pad 画阴影)
+    Bitmap Snapshot(out int pad)
+    {
+        pad = S(20);
+        var bmp = new Bitmap(Width + pad * 2, Height + pad * 2, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        using (var raw = new Bitmap(Width, Height))
+        using (var g = Graphics.FromImage(bmp))
+        {
+            DrawToBitmap(raw, new Rectangle(0, 0, Width, Height));
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            var rect = new RectangleF(pad, pad, Width, Height);
+            float r = S(8);
+            // 一圈圈往外扩、越往外越淡, 稍微往下偏
+            for (int i = pad; i >= 1; i--)
+                using (var path = Theme.RoundRect(new RectangleF(rect.X - i, rect.Y - i + i / 3f, rect.Width + i * 2, rect.Height + i * 2), r + i))
+                using (var b = new SolidBrush(Color.FromArgb(Theme.Dark ? 6 : 3, 0, 0, 0)))
+                    g.FillPath(b, path);
+            using (var path = Theme.RoundRect(rect, r))
+            {
+                using (var tb = new TextureBrush(raw))
+                {
+                    tb.TranslateTransform(pad, pad);
+                    g.FillPath(tb, path);
+                }
+                using (var p = new Pen(Theme.Border)) g.DrawPath(p, path);
+            }
+        }
+        return bmp;
+    }
+
+    // 动画结束: 显示真面板 (去掉分层样式, Windows 11 才会给它加圆角和阴影), 再撤掉替身
+    void Reveal()
+    {
+        if (closing || IsDisposed) return;
+        Opacity = 1;
         int ex = Native.GetWindowLong(Handle, Native.GWL_EXSTYLE);
-        int want = on ? ex | Native.WS_EX_LAYERED : ex & ~Native.WS_EX_LAYERED;
-        if (want == ex) return;
-        Native.SetWindowLong(Handle, Native.GWL_EXSTYLE, want);
-        if (on) Native.SetLayeredWindowAttributes(Handle, 0, (byte)(Opacity * 255), Native.LWA_ALPHA); // 刚加上分层样式时先给个透明度, 否则窗口会消失
+        Native.SetWindowLong(Handle, Native.GWL_EXSTYLE, ex & ~Native.WS_EX_LAYERED);
         Native.SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE | Native.SWP_FRAMECHANGED);
+        Update();
+        DisposeGhost();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) DisposeGhost();
+        base.Dispose(disposing);
     }
 
     protected override CreateParams CreateParams
@@ -77,25 +142,20 @@ class Flyout : Form
         int y = cursor.Y > wa.Bottom ? wa.Bottom - Height - gap
               : cursor.Y < wa.Top ? wa.Top + gap
               : Math.Max(wa.Top + gap, Math.Min(cursor.Y - Height / 2, wa.Bottom - Height - gap));
-        // 和 Windows 11 快速设置一样: 从任务栏方向滑出 + 淡入
-        int offset = cursor.Y < wa.Top ? -S(24) : S(24);
-        Opacity = 0;
-        Location = new Point(x, y + offset);
+        // 和 Windows 11 快速设置一样: 从任务栏方向滑出, 前 1/3 时间里淡入, 很快到位再慢慢停稳
+        slide = cursor.Y < wa.Top ? -S(40) : S(40);
+        Opacity = 0; // 真面板先透明地显示出来 (要拿焦点, 也要靠它截图)
+        Location = new Point(x, y);
         Show();
         Activate();
         Native.SetForegroundWindow(Handle); // 拿到焦点, 点到别处时才会触发 Deactivate 关闭
-        Anim.Run(this, "show", 0, 1, 220, t =>
+        if (!Anim.Enabled) { Reveal(); return; }
+        ShowGhost(new Point(x, y + slide), 0);
+        Anim.Run(this, "show", 0, 1, 330, Anim.Linear, t =>
         {
-            if (closing) return;
-            Opacity = t;
-            Top = y + (int)Math.Round(offset * (1 - t));
-        }, delegate
-        {
-            if (closing || IsDisposed) return;
-            Opacity = 1;
-            Top = y;
-            SetLayered(false);
-        });
+            if (closing || ghost == null) return;
+            ghost.Present(x, y + (int)Math.Round(slide * (1 - Anim.Decelerate(t))), Math.Min(1, t * 3));
+        }, Reveal);
     }
 
     public void Rebuild()
@@ -237,5 +297,70 @@ class Flyout : Form
         }
         int rows = (tiles.Count + cols - 1) / cols;
         return y + rows * (th + gap) + S(8);
+    }
+}
+
+// 动画用的"替身": 一张带透明通道的图做成的分层窗口. 图只上传一次, 之后每帧只改位置和透明度,
+// 由桌面合成器 (显卡) 完成, 不触发任何重绘
+class GhostWindow : Form
+{
+    readonly int pad;          // 图四周为阴影留的边距
+    readonly Native.SIZE size;
+    IntPtr memDc, bitmap, oldBitmap;
+    bool uploaded;
+
+    public GhostWindow(Bitmap image, int pad)
+    {
+        this.pad = pad;
+        FormBorderStyle = FormBorderStyle.None;
+        StartPosition = FormStartPosition.Manual;
+        ShowInTaskbar = false;
+        TopMost = true;
+        size = new Native.SIZE { cx = image.Width, cy = image.Height };
+        IntPtr screen = Native.GetDC(IntPtr.Zero);
+        memDc = Native.CreateCompatibleDC(screen);
+        Native.ReleaseDC(IntPtr.Zero, screen);
+        bitmap = image.GetHbitmap(Color.FromArgb(0));
+        oldBitmap = Native.SelectObject(memDc, bitmap);
+    }
+
+    protected override bool ShowWithoutActivation { get { return true; } }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= 0x80 | 0x8 | 0x20 | Native.WS_EX_LAYERED | 0x08000000; // TOOLWINDOW | TOPMOST | TRANSPARENT | LAYERED | NOACTIVATE
+            return cp;
+        }
+    }
+
+    // x, y 是面板本身左上角的位置 (阴影边距自动扣掉)
+    public void Present(int x, int y, float opacity)
+    {
+        var pt = new Native.POINT { X = x - pad, Y = y - pad };
+        var blend = new Native.BLENDFUNCTION { SourceConstantAlpha = (byte)Math.Round(Math.Max(0, Math.Min(1, opacity)) * 255), AlphaFormat = Native.AC_SRC_ALPHA };
+        if (!uploaded)
+        {
+            var src = new Native.POINT();
+            var sz = size;
+            Native.UpdateLayeredWindow(Handle, IntPtr.Zero, ref pt, ref sz, memDc, ref src, 0, ref blend, Native.ULW_ALPHA);
+            uploaded = true;
+            Show();
+        }
+        else Native.MoveLayeredWindow(Handle, IntPtr.Zero, ref pt, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, 0, ref blend, Native.ULW_ALPHA);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (memDc != IntPtr.Zero)
+        {
+            Native.SelectObject(memDc, oldBitmap);
+            Native.DeleteObject(bitmap);
+            Native.DeleteDC(memDc);
+            memDc = IntPtr.Zero;
+        }
+        base.Dispose(disposing);
     }
 }

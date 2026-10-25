@@ -128,6 +128,34 @@ static class Native
     public static extern bool SetLayeredWindowAttributes(IntPtr hWnd, uint key, byte alpha, uint flags);
     public const int GWL_EXSTYLE = -20, WS_EX_LAYERED = 0x80000;
     public const uint LWA_ALPHA = 2, SWP_NOZORDER = 4, SWP_FRAMECHANGED = 0x20;
+
+    // ---------- 动画: 跟显示器刷新同步 / 逐像素透明的分层窗口 ----------
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmFlush(); // 等到下一次桌面合成 (即下一帧)
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SIZE { public int cx, cy; }
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    public struct BLENDFUNCTION { public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat; }
+    public const uint ULW_ALPHA = 2;
+    public const byte AC_SRC_ALPHA = 1;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, uint crKey, ref BLENDFUNCTION pblend, uint flags);
+    // 只改位置和透明度, 不重新上传图像
+    [DllImport("user32.dll", SetLastError = true, EntryPoint = "UpdateLayeredWindow")]
+    public static extern bool MoveLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, IntPtr psize, IntPtr hdcSrc, IntPtr pptSrc, uint crKey, ref BLENDFUNCTION pblend, uint flags);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetDC(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    public static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
+    [DllImport("gdi32.dll")]
+    public static extern bool DeleteObject(IntPtr obj);
     [DllImport("user32.dll")]
     public static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")]

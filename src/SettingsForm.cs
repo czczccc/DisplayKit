@@ -141,12 +141,34 @@ class SettingsForm : Form, IKeyCapture
         AddNav("\uE7F8", "显示模式", Page.Display, ref y);
         AddNav("\uE713", "通用", Page.General, ref y);
 
-        indicator = new NavIndicator();
-        nav.Controls.Add(indicator);
-        indicator.MoveTo(navButtons[(int)page], false);
+        float top = PillAt(navButtons[(int)page]);
+        SetPill(top, top + S(16));
     }
 
-    NavIndicator indicator;
+    // 选中项左侧的强调色竖条 (Windows 11 设置的样式). 位置用导航面板坐标, 由各个按钮画出自己范围内的那一段
+    float PillAt(NavButton b) { return b.Top + (b.Height - S(16)) / 2f; }
+
+    void SetPill(float top, float bottom)
+    {
+        foreach (var nb in navButtons)
+        {
+            nb.PillTop = top - nb.Top;
+            nb.PillBottom = bottom - nb.Top;
+            nb.Invalidate();
+        }
+    }
+
+    // 滑到新选项: 前端先到、后端跟上, 中途竖条被拉长再收回
+    void MovePill(NavButton from, NavButton to)
+    {
+        float a = PillAt(from), z = PillAt(to), h = S(16);
+        bool downward = z > a;
+        Anim.Run(nav, "pill", 0, 1, 320, Anim.Linear, t =>
+        {
+            float lead = Anim.Decelerate(Math.Min(1, t * 1.6f)), trail = Anim.Decelerate(t);
+            SetPill(a + (z - a) * (downward ? trail : lead), a + h + (z - a) * (downward ? lead : trail));
+        });
+    }
 
     void AddNav(string glyph, string text, Page p, ref int y)
     {
@@ -154,13 +176,14 @@ class SettingsForm : Form, IKeyCapture
         b.Click += delegate
         {
             if (page == p) return;
+            var from = navButtons[(int)page];
             page = p;
             captureTarget = 0;
             keyHint = null;
             foreach (var nb in navButtons) { nb.Selected = nb == b; nb.Invalidate(); }
-            indicator.MoveTo(b, true);
             content.AutoScrollPosition = Point.Empty;
             Rebuild();
+            MovePill(from, b); // 重建页面要占用 UI 线程一会儿, 之后再开始动画, 不会一开始就掉帧
         };
         nav.Controls.Add(b);
         navButtons.Add(b);

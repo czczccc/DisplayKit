@@ -259,7 +259,8 @@ class ModernRenderer : ToolStripProfessionalRenderer
     }
 }
 
-// 补间动画: 一个共用的计时器驱动, 同一控件同一个 key 的新动画替换旧的.
+// 补间动画. 帧由后台线程按显示器刷新节奏 (DwmFlush) 发到 UI 线程, 240Hz 屏幕就是 240 帧;
+// 时间用高精度计时器. 同一控件同一个 key 的新动画替换旧的 (从当前值接着动, 不跳).
 // 系统关了"动画效果" (设置 > 辅助功能 > 视觉效果) 时直接跳到结果
 static class Anim
 {
@@ -267,14 +268,19 @@ static class Anim
     {
         public Control Owner;
         public string Key;
-        public int Start, Duration;
+        public long Start;
+        public double Duration;
         public float From, To;
+        public Func<float, float> Ease;
         public Action<float> Step;
         public Action Done;
     }
 
     static readonly List<Item> items = new List<Item>();
-    static Timer timer;
+    static readonly System.Threading.ManualResetEvent wake = new System.Threading.ManualResetEvent(false);
+    static Control marshal;      // 用来把帧发回 UI 线程
+    static int framePending;     // 上一帧还没处理完就不再发, 避免 UI 线程忙时帧堆积
+    static System.Threading.Thread clock;
 
     public static bool Enabled
     {
@@ -286,10 +292,18 @@ static class Anim
         }
     }
 
-    // 先快后慢, 和 Windows 11 的大多数过渡一样
-    static float EaseOut(float t) { t = 1 - t; return 1 - t * t * t; }
+    // Windows 11 的动画曲线: 出现用 Decelerate (很快到位再慢慢停稳), 消失用 Accelerate, 小的状态变化用 Standard
+    public static float Linear(float t) { return t; }
+    public static float Standard(float t) { t = 1 - t; return 1 - t * t * t; }
+    public static float Decelerate(float t) { t = 1 - t; return 1 - t * t * t * t * t; }
+    public static float Accelerate(float t) { return t * t; }
 
     public static void Run(Control owner, string key, float from, float to, int ms, Action<float> step, Action done = null)
+    {
+        Run(owner, key, from, to, ms, Standard, step, done);
+    }
+
+    public static void Run(Control owner, string key, float from, float to, int ms, Func<float, float> ease, Action<float> step, Action done = null)
     {
         items.RemoveAll(i => i.Owner == owner && i.Key == key);
         if (!Enabled || ms <= 0 || from == to)
@@ -298,31 +312,56 @@ static class Anim
             if (done != null) done();
             return;
         }
-        items.Add(new Item { Owner = owner, Key = key, Start = Environment.TickCount, Duration = ms, From = from, To = to, Step = step, Done = done });
-        if (timer == null)
+        items.Add(new Item
         {
-            timer = new Timer { Interval = 15 };
-            timer.Tick += Tick;
-        }
-        timer.Start();
+            Owner = owner, Key = key, Start = System.Diagnostics.Stopwatch.GetTimestamp(), Duration = ms,
+            From = from, To = to, Ease = ease, Step = step, Done = done,
+        });
         step(from);
+        StartClock();
     }
 
-    static void Tick(object sender, EventArgs e)
+    static void StartClock()
     {
-        int now = Environment.TickCount;
+        if (marshal == null) { marshal = new Control(); var h = marshal.Handle; } // 在 UI 线程上创建
+        wake.Set();
+        if (clock != null) return;
+        clock = new System.Threading.Thread(delegate ()
+        {
+            while (true)
+            {
+                wake.WaitOne();
+                // 等下一帧; 万一桌面合成不可用就退回约 120 帧
+                if (Native.DwmFlush() != 0) System.Threading.Thread.Sleep(8);
+                if (System.Threading.Interlocked.CompareExchange(ref framePending, 1, 0) == 0)
+                {
+                    try { marshal.BeginInvoke((Action)Frame); }
+                    catch { framePending = 0; }
+                }
+            }
+        });
+        clock.IsBackground = true;
+        clock.Priority = System.Threading.ThreadPriority.AboveNormal;
+        clock.Name = "AnimClock";
+        clock.Start();
+    }
+
+    static void Frame()
+    {
+        framePending = 0;
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
         foreach (var i in items.ToArray())
         {
             if (i.Owner.IsDisposed) { items.Remove(i); continue; }
-            float t = Math.Min(1f, unchecked(now - i.Start) / (float)i.Duration);
-            i.Step(i.From + (i.To - i.From) * EaseOut(t));
+            float t = (float)Math.Min(1.0, (now - i.Start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency / i.Duration);
+            i.Step(i.From + (i.To - i.From) * i.Ease(t));
             if (t >= 1)
             {
                 items.Remove(i);
                 if (i.Done != null) i.Done();
             }
         }
-        if (items.Count == 0) timer.Stop();
+        if (items.Count == 0) wake.Reset();
     }
 
     public static Color Blend(Color a, Color b, float t)
@@ -347,8 +386,8 @@ class FlatControl : Control
 
     void AnimateHover(float to, int ms) { Anim.Run(this, "hover", hoverT, to, ms, v => { hoverT = v; Invalidate(); }); }
 
-    protected override void OnMouseEnter(EventArgs e) { hover = true; AnimateHover(1, 120); base.OnMouseEnter(e); }
-    protected override void OnMouseLeave(EventArgs e) { hover = false; down = false; AnimateHover(0, 200); base.OnMouseLeave(e); }
+    protected override void OnMouseEnter(EventArgs e) { hover = true; AnimateHover(1, 90); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { hover = false; down = false; AnimateHover(0, 160); base.OnMouseLeave(e); }
     protected override void OnMouseDown(MouseEventArgs e) { if (e.Button == MouseButtons.Left) { down = true; Invalidate(); } base.OnMouseDown(e); }
     protected override void OnMouseUp(MouseEventArgs e) { down = false; Invalidate(); base.OnMouseUp(e); }
     protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
@@ -418,8 +457,21 @@ class RoundButton : FlatControl
 class Toggle : FlatControl
 {
     bool on;
-    float onT; // 0 = 关, 1 = 开; 点击时圆点滑过去, 颜色渐变
+    float onT;    // 0 = 关, 1 = 开; 点击时圆点滑过去, 颜色渐变
+    float pressT; // 按住时圆点横向拉长 (Windows 11 开关的手感)
     public event EventHandler Changed;
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (e.Button == MouseButtons.Left) Anim.Run(this, "press", pressT, 1, 90, v => { pressT = v; Invalidate(); });
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        Anim.Run(this, "press", pressT, 0, 160, v => { pressT = v; Invalidate(); });
+    }
 
     public Toggle(bool value)
     {
@@ -433,7 +485,7 @@ class Toggle : FlatControl
     protected override void OnClick(EventArgs e)
     {
         on = !on;
-        Anim.Run(this, "on", onT, on ? 1 : 0, 160, v => { onT = v; Invalidate(); });
+        Anim.Run(this, "on", onT, on ? 1 : 0, 200, v => { onT = v; Invalidate(); });
         if (Changed != null) Changed(this, e);
         base.OnClick(e);
     }
@@ -449,10 +501,13 @@ class Toggle : FlatControl
             if (onT < 1)
                 using (var p = new Pen(Color.FromArgb((int)(255 * (1 - onT)), Theme.SubText), Math.Max(1f, Ui.Scale))) g.DrawPath(p, path);
         }
-        float d = Ui.S(12) + Ui.S(2) * hoverT;
+        float d = Ui.S(12) + Ui.S(2) * hoverT, stretch = Ui.S(4) * pressT;
         float cx = Height / 2f + (Width - Height) * onT, cy = Height / 2f;
+        // 拉长时朝滑动方向伸出: 关着往右伸, 开着往左伸
+        float left = cx - d / 2 - stretch * onT, w = d + stretch;
         using (var b = new SolidBrush(Anim.Blend(Theme.SubText, Theme.AccentText, onT)))
-            g.FillEllipse(b, cx - d / 2, cy - d / 2, d, d);
+        using (var path = Theme.RoundRect(new RectangleF(left, cy - d / 2, w, d), d / 2))
+            g.FillPath(b, path);
     }
 }
 
@@ -575,41 +630,13 @@ class Tile : FlatControl
     }
 }
 
-// 导航选中项左侧的强调色竖条; 切换页面时从旧选项滑到新选项 (Windows 11 设置的样式)
-class NavIndicator : Control
-{
-    public NavIndicator()
-    {
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
-        Size = new Size(Ui.S(3), Ui.S(16));
-    }
-
-    // 竖条中心对准 target 的垂直中心
-    public void MoveTo(Control target, bool animate)
-    {
-        int to = target.Top + (target.Height - Height) / 2;
-        Left = target.Left;
-        BringToFront();
-        if (!animate) { Top = to; return; }
-        Anim.Run(this, "move", Top, to, 250, v => Top = (int)Math.Round(v));
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        g.Clear(Theme.NavSelected);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        using (var b = new SolidBrush(Theme.Accent))
-        using (var path = Theme.RoundRect(new RectangleF(0, 0, Width, Height), Width / 2f))
-            g.FillPath(b, path);
-    }
-}
-
 // 左侧导航项
 class NavButton : FlatControl
 {
     readonly string glyph;
     public bool Selected;
+    // 强调色竖条在本按钮坐标里的上下边 (由 SettingsForm 驱动, 切换页面时滑动); 没有交集就不画
+    public float PillTop = float.NaN, PillBottom = float.NaN;
 
     public NavButton(string glyph, string text)
     {
@@ -619,11 +646,14 @@ class NavButton : FlatControl
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        // 左侧的强调色竖条由 NavIndicator 单独画, 切换页面时滑过去
         var g = Begin(e);
         if (Selected || hoverT > 0)
             using (var b = new SolidBrush(Selected ? Theme.NavSelected : Anim.Blend(Parent != null ? Parent.BackColor : Theme.Bg, Theme.NavHover, hoverT)))
             using (var path = Theme.RoundRect(new RectangleF(0, 0, Width - 1, Height - 1), Ui.S(4)))
+                g.FillPath(b, path);
+        if (!float.IsNaN(PillTop) && PillBottom > 0 && PillTop < Height)
+            using (var b = new SolidBrush(Theme.Accent))
+            using (var path = Theme.RoundRect(new RectangleF(0, PillTop, Ui.S(3), PillBottom - PillTop), Ui.S(3) / 2f))
                 g.FillPath(b, path);
         var flags = TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
         TextRenderer.DrawText(g, glyph, Theme.Icons, new Rectangle(Ui.S(14), 0, Ui.S(24), Height), Theme.Text, flags | TextFormatFlags.HorizontalCenter);
