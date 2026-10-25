@@ -883,7 +883,7 @@ class SettingsForm : Form, IKeyCapture
             c1.AddRow("防烧屏已暂停", app.PausedUntil == DateTime.MaxValue ? "直到手动恢复" : "到 " + app.PausedUntil.ToString("HH:mm") + " 自动恢复",
                 Button("恢复", true, delegate { app.Resume(); Later(); }));
         else
-            c1.AddRow("暂停防烧屏", "临时不自动黑屏，快捷键和显示模式不受影响", Drop("暂停", delegate
+            c1.AddRow("暂停防烧屏", "看视频时临时不自动黑屏，到时间自动恢复", Drop("暂停", delegate
             {
                 var m = Ui.Menu();
                 foreach (int min in new[] { 30, 60, 120, 0 }) { int v = min; Ui.Item(m.Items, App.PauseName(v), false, delegate { app.Pause(v); Later(); }); }
@@ -931,11 +931,11 @@ class SettingsForm : Form, IKeyCapture
     {
         var cfg = app.Cfg;
         var c = new Card(W);
-        c.AddRow("跟随日出日落切换深浅色", "白天浅色、日落后深色；手动改过后到下次日出或日落再自动切换",
+        c.AddRow("跟随日出日落切换深浅色", "白天浅色、晚上深色；手动切过后，到下次日出或日落再自动切",
             Switch(cfg.AutoTheme, v => { cfg.AutoTheme = v; app.ApplySunTheme(); Later(); }));
         string tintSub = app.HdrState == true ? "现在开着 HDR，暖色不起作用"
             : app.NightTintFailed ? "显示器不接受调色曲线"
-            : "日落到日出之间把屏幕调暖；别和 Windows 夜间模式同时开";
+            : "晚上把屏幕调黄，不刺眼；别和 Windows 夜间模式一起开";
         c.AddRow("夜间暖色", tintSub,
             Drop(KelvinName(cfg.NightKelvin), delegate
             {
@@ -943,7 +943,7 @@ class SettingsForm : Form, IKeyCapture
                 foreach (int k in NightKelvins) { int v = k; Ui.Item(m.Items, KelvinName(v), cfg.NightKelvin == v, delegate { cfg.NightKelvin = v; Changed(); }); }
                 return m;
             }, S(150)));
-        c.AddRow("跟随日出日落调亮度", app.Brightness < 0 ? "需要显示器支持 DDC/CI（见「显示模式」页）" : "调的是显示器背光；手动调过后到下次日出或日落再自动调",
+        c.AddRow("跟随日出日落调亮度", app.Brightness < 0 ? "需要显示器支持 DDC/CI（见「显示模式」页）" : "白天调亮、晚上调暗显示器；手动调过后，到下次日出或日落再调",
             Switch(cfg.AutoBrightness, v => { cfg.AutoBrightness = v; app.ApplySunBrightness(); Later(); }));
         if (cfg.AutoBrightness)
         {
@@ -965,13 +965,13 @@ class SettingsForm : Form, IKeyCapture
                     ?? (cfg.HasLocation ? "已定位：" + Settings.FormatCoord(cfg.Latitude) + ", " + Settings.FormatCoord(cfg.Longitude) : "还没有定位");
                 var relocate = Button("重新定位", false, delegate { app.Locate(); Later(); });
                 relocate.Enabled = !app.Locating;
-                c.AddRow("位置", status, Ui.Group(source, relocate));
+                c.AddRow("位置（用来算日出日落）", status, Ui.Group(source, relocate));
                 if (!app.Locating && app.LocationStatus != null)
                     c.AddRow("Windows 定位设置", "需要打开「定位服务」和「允许桌面应用访问你的位置」", Button("打开", false, delegate { App.OpenUrl("ms-settings:privacy-location"); }));
             }
             else
             {
-                c.AddRow("位置", "不使用定位服务，按下面的坐标计算", source);
+                c.AddRow("位置（用来算日出日落）", "不用定位，按下面填的坐标算", source);
                 string shown = coordError != null ? coordText : cfg.HasLocation ? Settings.FormatCoord(cfg.Latitude) + ", " + Settings.FormatCoord(cfg.Longitude) : "";
                 var field = new TextField(shown, S(200));
                 field.Box.LostFocus += delegate { CommitCoord(field.Box.Text); };
@@ -979,9 +979,11 @@ class SettingsForm : Form, IKeyCapture
                 c.AddRow("坐标", "纬度, 经度，比如上海是 31.23, 121.47", field);
                 if (coordError != null) c.AddNote(coordError, Theme.Warn);
             }
-            string sub = cfg.HasLocation ? "到日出、日落时自动切换" : "有了位置后才会自动切换";
+            string sub = !cfg.HasLocation ? "有了位置后才会自动切换"
+                : cfg.AutoTheme ? "手动切过深浅色的话，点右边按钮马上按时间切回来"
+                : "到这两个时间自动切换";
             if (cfg.AutoTheme)
-                c.AddRow(SunSummary(), sub, Button("立即应用", false, delegate { app.ApplySunTheme(); Later(); }));
+                c.AddRow(SunSummary(), sub, Button("按时间切换", false, delegate { app.ApplySunTheme(); Later(); }));
             else
                 c.AddRow(SunSummary(), sub, null);
         }
@@ -1006,7 +1008,7 @@ class SettingsForm : Form, IKeyCapture
     // 深浅色切换时 (自动或手动) 换成对应的壁纸
     void WallpaperRow(Card c, string title, string path, Action<string> set)
     {
-        string sub = path.Length == 0 ? "不更换" : File.Exists(path) ? Path.GetFileName(path) : "文件不见了：" + Path.GetFileName(path);
+        string sub = path.Length == 0 ? "没选，切换深浅色时不换壁纸" : File.Exists(path) ? Path.GetFileName(path) : "文件不见了：" + Path.GetFileName(path);
         var pick = Button("选择…", false, delegate
         {
             using (var ofd = new OpenFileDialog { Title = "选择" + title, Filter = "图片 (*.jpg;*.jpeg;*.png;*.bmp)|*.jpg;*.jpeg;*.png;*.bmp" })
