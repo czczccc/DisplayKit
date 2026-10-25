@@ -271,6 +271,12 @@ class Settings
     public int ScheduleStart = 23, ScheduleEnd = 7; // 整点, 可以跨午夜
     public int ScheduleTimeoutSec = 60;     // 时段内的黑屏等待时间, 0 = 不自动黑屏
     public int LockScreenOffSec = 10;   // 锁屏后多少秒关闭显示器, 0 = 不关
+    public bool TakeOverIdle;           // 接管 Windows 的"关闭屏幕"和屏保 (改成从不, 交给本程序)
+    public bool LockOnPowerOff;         // 黑屏后关闭显示器时顺便锁屏
+    // 接管时记下的 Windows 原值, 交还时写回; 程序异常退出后下次启动据此恢复或继续接管
+    public string TakenScheme = "";     // 改过的电源方案 GUID, 空 = 没有接管关屏时间
+    public int TakenAc, TakenDc;        // 原来的关屏时间 (秒), 插电 / 电池
+    public int TakenScreenSaver = -1;   // 原来的屏保开关: 1 开 / 0 关, -1 = 没有接管屏保
     public bool CheckUpdates = true;
     public bool AutoInstallUpdates = true; // 发现新版本后自动下载并重启到新版本
 
@@ -427,6 +433,12 @@ class Settings
                     if (d.Trim().Length > 0) BlankDevices.Add(d.Trim());
                 break;
             case "LockScreenOffSec": if (int.TryParse(v, out n) && n >= 0) LockScreenOffSec = n; break;
+            case "TakeOverIdle": TakeOverIdle = v == "1"; break;
+            case "LockOnPowerOff": LockOnPowerOff = v == "1"; break;
+            case "TakenScheme": TakenScheme = v; break;
+            case "TakenAc": if (int.TryParse(v, out n) && n >= 0) TakenAc = n; break;
+            case "TakenDc": if (int.TryParse(v, out n) && n >= 0) TakenDc = n; break;
+            case "TakenScreenSaver": if (int.TryParse(v, out n) && n >= -1 && n <= 1) TakenScreenSaver = n; break;
             case "CheckUpdates": CheckUpdates = v == "1"; break;
             case "AutoInstallUpdates": AutoInstallUpdates = v == "1"; break;
         }
@@ -502,6 +514,12 @@ class Settings
             sb.AppendLine("Whitelist=" + string.Join("|", Whitelist.ToArray()));
             sb.AppendLine("BlankDevices=" + string.Join("|", BlankDevices.ToArray()));
             sb.AppendLine("LockScreenOffSec=" + LockScreenOffSec);
+            sb.AppendLine("TakeOverIdle=" + (TakeOverIdle ? "1" : "0"));
+            sb.AppendLine("LockOnPowerOff=" + (LockOnPowerOff ? "1" : "0"));
+            sb.AppendLine("TakenScheme=" + TakenScheme);
+            sb.AppendLine("TakenAc=" + TakenAc);
+            sb.AppendLine("TakenDc=" + TakenDc);
+            sb.AppendLine("TakenScreenSaver=" + TakenScreenSaver);
             sb.AppendLine("CheckUpdates=" + (CheckUpdates ? "1" : "0"));
             sb.AppendLine("AutoInstallUpdates=" + (AutoInstallUpdates ? "1" : "0"));
             sb.AppendLine();

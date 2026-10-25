@@ -77,7 +77,27 @@ static class Native
     public static extern bool SystemParametersInfo(uint action, uint param, ref int pv, uint winIni);
     public const uint SPI_SETCURSORS = 0x57, SPI_SETDESKWALLPAPER = 0x14, SPI_GETDESKWALLPAPER = 0x73;
     public const uint SPI_GETCLIENTAREAANIMATION = 0x1042; // "动画效果"开关
+    public const uint SPI_GETSCREENSAVEACTIVE = 0x10, SPI_SETSCREENSAVEACTIVE = 0x11;
     public const uint SPIF_UPDATEINIFILE = 1, SPIF_SENDCHANGE = 2;
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool LockWorkStation();
+
+    // ---------- 电源方案 (Windows 的"关闭屏幕"时间) ----------
+
+    [DllImport("powrprof.dll")]
+    public static extern uint PowerGetActiveScheme(IntPtr root, out IntPtr scheme); // 返回的 GUID 要用 LocalFree 释放
+    [DllImport("powrprof.dll")]
+    public static extern uint PowerReadACValueIndex(IntPtr root, ref Guid scheme, ref Guid subgroup, ref Guid setting, out uint value);
+    [DllImport("powrprof.dll")]
+    public static extern uint PowerReadDCValueIndex(IntPtr root, ref Guid scheme, ref Guid subgroup, ref Guid setting, out uint value);
+    [DllImport("powrprof.dll")]
+    public static extern uint PowerWriteACValueIndex(IntPtr root, ref Guid scheme, ref Guid subgroup, ref Guid setting, uint value);
+    [DllImport("powrprof.dll")]
+    public static extern uint PowerWriteDCValueIndex(IntPtr root, ref Guid scheme, ref Guid subgroup, ref Guid setting, uint value);
+    [DllImport("powrprof.dll")]
+    public static extern uint PowerSetActiveScheme(IntPtr root, ref Guid scheme);
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr LocalFree(IntPtr mem);
 
     // ---------- DDC/CI (显示器自身的亮度 / 对比度 / 输入源) ----------
 

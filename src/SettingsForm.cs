@@ -443,6 +443,10 @@ class SettingsForm : Form, IKeyCapture
             foreach (int min in PowerOffs) { int v = min; Ui.Item(m.Items, PowerOffName(v), cfg.PowerOffMin == v, delegate { cfg.PowerOffMin = v; Changed(); }); }
             return m;
         }, S(150)));
+        c1.AddRow("接管 Windows 关屏和屏保", app.SystemIdleStatus, Switch(cfg.TakeOverIdle, v => { cfg.TakeOverIdle = v; app.SyncSystemIdle(); Later(); }));
+        if (cfg.TakeOverIdle && cfg.PowerOffMin == 0)
+            c1.AddNote("「黑屏后关闭显示器」是「不关闭」时，显示器会一直不关，建议设个时间", Theme.Warn);
+        c1.AddRow("关闭显示器时锁屏", "像按 Win+L 一样锁电脑，回来要输密码", Switch(cfg.LockOnPowerOff, v => cfg.LockOnPowerOff = v));
         c1.AddRow("鼠标防抖", "鼠标移动超过这个距离才算在使用，过滤传感器抖动", Drop(ThresholdName(cfg.MoveThreshold), delegate
         {
             var m = Ui.Menu();
@@ -507,7 +511,7 @@ class SettingsForm : Form, IKeyCapture
         y = Section("减少静态画面", c4, y);
 
         var c3 = new Card(W);
-        c3.AddRow("全屏应用", "看电影、玩游戏时", Switch(cfg.SkipFullscreen, v => cfg.SkipFullscreen = v));
+        c3.AddRow("全屏应用", "看电影、玩游戏时；暂停后没声音了照样会黑屏", Switch(cfg.SkipFullscreen, v => cfg.SkipFullscreen = v));
         c3.AddRow("正在播放声音", "窗口化视频、直播、音乐；挂着音乐离开时也不会黑屏", Switch(cfg.SkipAudio, v => cfg.SkipAudio = v));
         c3.AddRow("手柄操作", "Xbox 等 XInput 手柄的按键和摇杆算作在使用", Switch(cfg.Gamepad, v => cfg.Gamepad = v));
         c3.AddRow("白名单程序", "这些程序在前台时不黑屏", Drop("添加程序", WhitelistMenu, S(120)));

@@ -24,7 +24,7 @@ interface IKeyCapture
 
 class App : ApplicationContext
 {
-    public const string Version = "1.6.7";
+    public const string Version = "1.6.8";
     public const string Repo = "czczccc/DisplayKit";
     public static string RepoUrl { get { return "https://github.com/" + Repo; } }
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -184,6 +184,7 @@ class App : ApplicationContext
         RefreshDisplay();
         CursorHider.Restore();
         ApplyWallpaper();
+        SyncSystemIdle(); // 上次异常退出没交还的话, 这里继续接管或按开关还原
 
         // 旧版 OledGuard 还在运行的话, 两边的键盘钩子会抢同一组快捷键
         Mutex legacy;
@@ -544,6 +545,104 @@ class App : ApplicationContext
         monitorOffSent = false;
     }
 
+    // ---------- 接管 Windows 的关屏和屏保 ----------
+
+    int lastIdleSync = unchecked(Environment.TickCount - 600000);
+    string idleError; // 接管失败的原因, 显示在设置里
+
+    // 按开关接管或交还. 启动时、每分钟、拨开关时调用;
+    // 用户在 Windows 设置里改了关屏时间, 就把新值当作原值记下, 再改回从不
+    public void SyncSystemIdle()
+    {
+        lastIdleSync = Environment.TickCount;
+        bool changed = false;
+        idleError = null;
+        Guid scheme;
+        if (!SystemIdle.ActiveScheme(out scheme))
+        {
+            if (cfg.TakeOverIdle) idleError = "读不到 Windows 的电源方案";
+        }
+        else
+        {
+            string id = scheme.ToString();
+            // 换过电源方案或不再接管: 先把之前改过的方案还原
+            if (cfg.TakenScheme.Length > 0 && (cfg.TakenScheme != id || !cfg.TakeOverIdle)) { RestoreTimeout(); changed = true; }
+            uint ac, dc;
+            if (cfg.TakeOverIdle && SystemIdle.ReadTimeout(scheme, out ac, out dc))
+            {
+                bool first = cfg.TakenScheme.Length == 0;
+                if (first || ac != 0 || dc != 0)
+                {
+                    if (first || ac != 0) cfg.TakenAc = (int)ac;
+                    if (first || dc != 0) cfg.TakenDc = (int)dc;
+                    if (SystemIdle.WriteTimeout(scheme, 0, 0))
+                    {
+                        cfg.TakenScheme = id;
+                        Log.Write("接管 Windows 关屏时间, 原来插电 " + cfg.TakenAc + " 秒 / 电池 " + cfg.TakenDc + " 秒");
+                    }
+                    else idleError = "改不了 Windows 的关屏时间（可能被系统策略限制）";
+                    changed = true;
+                }
+            }
+            else if (cfg.TakeOverIdle) idleError = "读不到 Windows 的关屏时间";
+        }
+
+        if (cfg.TakeOverIdle && !SystemIdle.ScreenSaverByPolicy)
+        {
+            bool on = SystemIdle.ScreenSaverActive;
+            if (cfg.TakenScreenSaver < 0 || on) { cfg.TakenScreenSaver = on ? 1 : Math.Max(0, cfg.TakenScreenSaver); changed = true; }
+            if (on) SystemIdle.SetScreenSaverActive(false);
+        }
+        else if (cfg.TakenScreenSaver >= 0) { RestoreScreenSaver(); changed = true; }
+        if (changed) cfg.Save();
+    }
+
+    void RestoreTimeout()
+    {
+        try
+        {
+            if (SystemIdle.WriteTimeout(new Guid(cfg.TakenScheme), (uint)cfg.TakenAc, (uint)cfg.TakenDc)) Log.Write("已交还 Windows 关屏时间");
+            else Log.Write("交还 Windows 关屏时间失败");
+        }
+        catch (Exception ex) { Log.Write("交还 Windows 关屏时间失败: " + ex.Message); }
+        cfg.TakenScheme = "";
+    }
+
+    void RestoreScreenSaver()
+    {
+        if (cfg.TakenScreenSaver == 1) SystemIdle.SetScreenSaverActive(true);
+        cfg.TakenScreenSaver = -1;
+    }
+
+    // 退出时交还, 开关保持不变, 下次启动再接管
+    void ReleaseSystemIdle()
+    {
+        if (cfg.TakenScheme.Length == 0 && cfg.TakenScreenSaver < 0) return;
+        if (cfg.TakenScheme.Length > 0) RestoreTimeout();
+        if (cfg.TakenScreenSaver >= 0) RestoreScreenSaver();
+        cfg.Save();
+    }
+
+    public string SystemIdleStatus
+    {
+        get
+        {
+            if (idleError != null) return idleError;
+            if (!cfg.TakeOverIdle) return "免得 Windows 先关屏或弹出屏保，打乱这里的设置";
+            string s = cfg.TakenScheme.Length == 0 ? "已交给 DisplayKit" : "Windows 原本" + IdleTimeoutName(cfg.TakenAc, cfg.TakenDc) + "，已交给 DisplayKit";
+            return SystemIdle.ScreenSaverByPolicy ? s + "；屏保受系统策略控制，没动" : s;
+        }
+    }
+
+    static string IdleTimeoutName(int ac, int dc)
+    {
+        Func<int, string> name = sec => sec == 0 ? "从不" : sec < 60 ? sec + " 秒" : sec / 60 + " 分钟";
+        bool battery = SystemInformation.PowerStatus.BatteryChargeStatus != BatteryChargeStatus.NoSystemBattery;
+        if (ac == 0 && (dc == 0 || !battery)) return "不自动关屏";
+        if (!battery || ac == dc) return " " + name(ac) + "后关屏";
+        return "插电 " + name(ac) + "、电池 " + name(dc) + "后关屏";
+    }
+
     public void ToggleDesktopIcons()
     {
         if (!DesktopIcons.Toggle()) tray.ShowBalloon("找不到桌面窗口", "资源管理器可能没有在运行", TrayIcon.InfoWarning);
@@ -606,9 +705,11 @@ class App : ApplicationContext
     {
         if (confirming) return "等待确认显示模式"; // 别让黑屏盖住确认框
         if (fgProcess != null && Native.GetForegroundWindow() == fgHwnd && cfg.Whitelist.Contains(fgProcess)) return "白名单：" + fgProcess;
-        // 全屏应用只在它所在的显示器会被黑屏时才算 (比如游戏在另一块非 OLED 屏上就不影响)
-        if (cfg.SkipFullscreen && fullscreen && BlankTargets().Exists(s => s.DeviceName == fgScreen)) return "全屏应用";
-        if (cfg.SkipAudio && audio.IsPlaying()) return "正在播放声音";
+        bool sound = ((cfg.SkipFullscreen && fullscreen) || cfg.SkipAudio) && audio.IsPlaying();
+        // 全屏应用只在它所在的显示器会被黑屏时才算 (比如游戏在另一块非 OLED 屏上就不影响);
+        // 还得有声音: 全屏电影暂停后画面静止最容易烧屏, 不能因为是全屏就一直不黑
+        if (cfg.SkipFullscreen && fullscreen && sound && BlankTargets().Exists(s => s.DeviceName == fgScreen)) return "全屏应用";
+        if (cfg.SkipAudio && sound) return "正在播放声音";
         return null;
     }
 
@@ -634,6 +735,9 @@ class App : ApplicationContext
                 int quiet = powerOffNow && !monitorOffSent ? 1000 : 10000; // 快捷键刚按下: 只等松开按键 (松键也会唤醒显示器)
                 if ((!monitorOffSent || wokenSince) && Since(lastRawInput) >= quiet)
                 {
+                    // 第一次关显示器时顺便锁屏 (锁屏后黑屏会撤掉, 由"锁屏后关闭显示器"接着管)
+                    if (!monitorOffSent && cfg.LockOnPowerOff && !Native.LockWorkStation())
+                        Log.Write("锁屏失败, 错误码 " + System.Runtime.InteropServices.Marshal.GetLastWin32Error());
                     tray.MonitorOff();
                     monitorOffSent = true;
                     monitorOffAt = Environment.TickCount;
@@ -685,6 +789,7 @@ class App : ApplicationContext
         }
 
         CheckDdc();
+        if (Since(lastIdleSync) >= 60000 && (cfg.TakeOverIdle || cfg.TakenScheme.Length > 0 || cfg.TakenScreenSaver >= 0)) SyncSystemIdle();
         if (Since(lastAutoCheck) >= 2000) CheckAutoSwitch();
         if (Since(lastSunCheck) >= 30000) CheckSunTheme();
         UpdateNightTint();
@@ -1627,6 +1732,7 @@ class App : ApplicationContext
         StopLocate(null);
         CursorHider.Restore();
         NightTint.Restore();
+        ReleaseSystemIdle();
         HideWarning();
         if (dimmed && ddcDevice != null)
         {
