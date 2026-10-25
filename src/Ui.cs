@@ -354,11 +354,13 @@ static class Anim
         {
             if (i.Owner.IsDisposed) { items.Remove(i); continue; }
             float t = (float)Math.Min(1.0, (now - i.Start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency / i.Duration);
-            i.Step(i.From + (i.To - i.From) * i.Ease(t));
+            try { i.Step(i.From + (i.To - i.From) * i.Ease(t)); }
+            catch (Exception ex) { Log.Write("动画出错: " + ex.Message); t = 1; } // 直接结束, 收尾照样执行 (比如销毁动画替身)
             if (t >= 1)
             {
                 items.Remove(i);
-                if (i.Done != null) i.Done();
+                try { if (i.Done != null) i.Done(); }
+                catch (Exception ex) { Log.Write("动画收尾出错: " + ex.Message); }
             }
         }
         if (items.Count == 0) wake.Reset();

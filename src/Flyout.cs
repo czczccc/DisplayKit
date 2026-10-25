@@ -25,23 +25,16 @@ class Flyout : Form
         Build();
         Deactivate += delegate
         {
-            IntPtr fg = Native.GetForegroundWindow();
             // 焦点跑到了动画替身上 (按说不会, 以防万一): 抢回来, 不关面板
-            if (ghost != null && fg == ghost.Handle) { Activate(); return; }
-            if (unchecked(Environment.TickCount - shownAt) < 500)
-            {
-                var cls = new System.Text.StringBuilder(64);
-                if (fg != IntPtr.Zero) Native.GetClassName(fg, cls, cls.Capacity);
-                Log.Write("快捷面板刚打开就失去焦点, 当前前台窗口: " + (fg == IntPtr.Zero ? "无" : cls.ToString()));
-            }
+            if (ghost != null && Native.GetForegroundWindow() == ghost.Handle) { Activate(); return; }
             FadeClose();
         };
         KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) FadeClose(); };
     }
 
     bool closing;
-    int shownAt;        // 打开的时间, 用来发现"刚打开就被关掉"的情况
     int slide;          // 滑动方向和距离: 任务栏在下面时为正 (从下往上滑出)
+    Point anchor;       // 打开时的鼠标位置, 面板重建改变高度后据此重新贴靠任务栏
     GhostWindow ghost;  // 动画期间代替面板显示的截图
 
     // 动画: 真面板截一张图做成逐像素透明的分层窗口, 动画时只移动这张图 (显卡合成, 不重绘几十个控件, 不闪);
@@ -121,10 +114,18 @@ class Flyout : Form
         DisposeGhost();
     }
 
+    // 直接 Close() (点了会关闭面板的按钮) 时, 窗口销毁过程中还会触发 Deactivate → FadeClose;
+    // 先标记 closing, 免得它再造一个替身, 而面板已释放、动画回调不再执行, 替身就永远留在屏幕上
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        closing = true;
+        base.OnFormClosing(e);
+    }
+
     protected override void Dispose(bool disposing)
     {
-        if (disposing) DisposeGhost();
         base.Dispose(disposing);
+        if (disposing) DisposeGhost(); // 放在 base 之后: 销毁窗口时触发的事件里建的替身也一并清掉
     }
 
     protected override CreateParams CreateParams
@@ -146,20 +147,13 @@ class Flyout : Form
     // 贴着任务栏、靠近鼠标 (托盘图标) 的位置弹出
     public void ShowAt(Point cursor)
     {
-        var screen = Screen.FromPoint(cursor);
-        var wa = screen.WorkingArea;
-        int gap = S(12);
-        int x = cursor.X > wa.Right ? wa.Right - Width - gap
-              : cursor.X < wa.Left ? wa.Left + gap
-              : Math.Max(wa.Left + gap, Math.Min(cursor.X - Width / 2, wa.Right - Width - gap));
-        int y = cursor.Y > wa.Bottom ? wa.Bottom - Height - gap
-              : cursor.Y < wa.Top ? wa.Top + gap
-              : Math.Max(wa.Top + gap, Math.Min(cursor.Y - Height / 2, wa.Bottom - Height - gap));
+        anchor = cursor;
+        var pos = Place();
+        int x = pos.X, y = pos.Y;
         // 和 Windows 11 快速设置一样: 从任务栏方向滑出, 前 1/3 时间里淡入, 很快到位再慢慢停稳
-        slide = cursor.Y < wa.Top ? -S(40) : S(40);
-        shownAt = Environment.TickCount;
+        slide = cursor.Y < Screen.FromPoint(cursor).WorkingArea.Top ? -S(40) : S(40);
         Opacity = 0; // 真面板先透明地显示出来 (要拿焦点, 也要靠它截图)
-        Location = new Point(x, y);
+        Location = pos;
         Show();
         Activate();
         Native.SetForegroundWindow(Handle); // 拿到焦点, 点到别处时才会触发 Deactivate 关闭
@@ -172,6 +166,20 @@ class Flyout : Form
         }, Reveal);
     }
 
+    // 按当前大小算出贴着任务栏的位置
+    Point Place()
+    {
+        var wa = Screen.FromPoint(anchor).WorkingArea;
+        int gap = S(12);
+        int x = anchor.X > wa.Right ? wa.Right - Width - gap
+              : anchor.X < wa.Left ? wa.Left + gap
+              : Math.Max(wa.Left + gap, Math.Min(anchor.X - Width / 2, wa.Right - Width - gap));
+        int y = anchor.Y > wa.Bottom ? wa.Bottom - Height - gap
+              : anchor.Y < wa.Top ? wa.Top + gap
+              : Math.Max(wa.Top + gap, Math.Min(anchor.Y - Height / 2, wa.Bottom - Height - gap));
+        return new Point(x, y);
+    }
+
     public void Rebuild()
     {
         var old = new List<Control>();
@@ -179,6 +187,7 @@ class Flyout : Form
         Controls.Clear();
         foreach (var c in old) c.Dispose();
         Build();
+        if (Visible) Location = Place(); // 高度可能变了 (比如读到亮度后多出滑块), 重新贴靠任务栏, 免得压到任务栏上
     }
 
     // 读到显示器亮度后: 之前显示"读不到"或数值变了, 并且用户没在拖滑块, 才刷新
