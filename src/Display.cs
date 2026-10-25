@@ -137,6 +137,9 @@ static class DisplayController
             }
         }
         if (p.Hdr != DisplayProfile.HdrKeep) SetHdr(device, p.Hdr == DisplayProfile.HdrOn);
+        // 亮度走 DDC/CI, 显示器不支持时只记日志, 不让整个切换失败
+        if (p.Brightness >= 0 && !Ddc.SetPercent(device, Ddc.Brightness, p.Brightness))
+            Log.Write("切换到 " + p.Name + ": 设置亮度失败 (显示器可能不支持 DDC/CI)");
     }
 
     // ---------- HDR ----------

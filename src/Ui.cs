@@ -381,6 +381,95 @@ class Toggle : FlatControl
     }
 }
 
+// 滑块 (0–100), 左侧可选图标, 右侧显示数值. 拖动或滚轮时触发 ValueChanged
+class Slider : FlatControl
+{
+    int value;
+    bool dragging;
+    readonly string glyph;
+    public event EventHandler ValueChanged;
+
+    public Slider(int value, int width, string glyph)
+    {
+        this.value = Math.Max(0, Math.Min(100, value));
+        this.glyph = glyph;
+        BackColor = Theme.Card;
+        Size = new Size(width, Ui.S(32));
+    }
+
+    public int Value { get { return value; } }
+
+    int Left0 { get { return glyph != null ? Ui.S(34) : Ui.S(12); } } // 留出半个滑块的位置, 0% 时不被裁掉
+    int TextW { get { return Ui.S(46); } }
+    float TrackW { get { return Width - Left0 - TextW - Ui.S(8); } }
+
+    void SetFromX(int x)
+    {
+        int v = (int)Math.Round((x - Left0) / TrackW * 100);
+        Change(v);
+    }
+
+    void Change(int v)
+    {
+        v = Math.Max(0, Math.Min(100, v));
+        if (v == value) return;
+        value = v;
+        Invalidate();
+        if (ValueChanged != null) ValueChanged(this, EventArgs.Empty);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (e.Button != MouseButtons.Left) return;
+        dragging = true;
+        Capture = true;
+        SetFromX(e.X);
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        if (dragging) SetFromX(e.X);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        base.OnMouseUp(e);
+        dragging = false;
+        Capture = false;
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        base.OnMouseWheel(e);
+        Change(value + (e.Delta > 0 ? 5 : -5));
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(BackColor);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        float cy = Height / 2f, th = Ui.S(4), x0 = Left0, w = TrackW;
+        var flags = TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+        if (glyph != null)
+            TextRenderer.DrawText(g, glyph, Theme.Icons, new Rectangle(0, 0, Ui.S(28), Height), Theme.Text, flags | TextFormatFlags.HorizontalCenter);
+        using (var path = Theme.RoundRect(new RectangleF(x0, cy - th / 2, w, th), th / 2))
+        using (var b = new SolidBrush(Theme.ControlBorder)) g.FillPath(b, path);
+        float fill = w * value / 100f;
+        if (fill > th)
+            using (var path = Theme.RoundRect(new RectangleF(x0, cy - th / 2, fill, th), th / 2))
+            using (var b = new SolidBrush(Theme.Accent)) g.FillPath(b, path);
+        float d = Ui.S(18), cx = x0 + fill;
+        using (var b = new SolidBrush(Theme.Control)) g.FillEllipse(b, cx - d / 2, cy - d / 2, d, d);
+        using (var p = new Pen(Theme.ControlBorder)) g.DrawEllipse(p, cx - d / 2, cy - d / 2, d, d);
+        float dot = Ui.S(hover || dragging ? 10 : 8);
+        using (var b = new SolidBrush(Theme.Accent)) g.FillEllipse(b, cx - dot / 2, cy - dot / 2, dot, dot);
+        TextRenderer.DrawText(g, value + "%", Font, new Rectangle(Width - TextW, 0, TextW, Height), Theme.Text, flags | TextFormatFlags.Right);
+    }
+}
+
 // 左侧导航项
 class NavButton : FlatControl
 {

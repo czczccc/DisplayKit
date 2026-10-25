@@ -24,7 +24,7 @@ interface IKeyCapture
 
 class App : ApplicationContext
 {
-    public const string Version = "1.4.1";
+    public const string Version = "1.5.0";
     public const string Repo = "czczccc/DisplayKit";
     public static string RepoUrl { get { return "https://github.com/" + Repo; } }
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -75,6 +75,18 @@ class App : ApplicationContext
     // 显示模式状态
     DisplayState display;
     bool? hdrState; // 要切换的显示器的 HDR 状态, null = 不支持
+
+    // 显示器硬件设置 (DDC/CI), 作用在"要切换的显示器"上
+    const int BrightnessStep = 10;
+    readonly DdcWriter ddc = new DdcWriter();
+    string ddcDevice;                        // 下面这些值读自哪台显示器
+    int brightness = -1, contrast = -1;      // 百分比, -1 = 读不到 (不支持 DDC/CI 或还在读)
+    int input = -1;
+    List<int> inputs;                        // 显示器声明支持的输入源
+    bool ddcReading;
+    OsdForm osd;
+    volatile bool dimmed, undimQueued;       // 闲置时降了亮度
+    int dimmedFrom;
     int profileIndex = -1;
     bool switching, confirming;
     int lastAutoCheck = Environment.TickCount;
@@ -97,6 +109,8 @@ class App : ApplicationContext
     int geoStartedAt;
     DateTime nextLocate = DateTime.Now.AddSeconds(5);
     string locationStatus;
+    bool? sunBright;                            // 上次按日出日落定下的亮度 (true = 白天), null = 还没定
+    int rampTarget = -1, lastRamp;              // 日出日落时亮度逐步过渡到的目标, -1 = 没有在过渡
     bool night;                                 // 现在是日落到日出之间
     double tintKelvin = NightTint.Neutral;      // 当前已应用的色温, 渐变用
     int lastTintApply;
@@ -112,6 +126,11 @@ class App : ApplicationContext
     public string GuardStatus { get { return guardStatus; } }
     public DisplayState Display { get { return display; } }
     public bool? HdrState { get { return hdrState; } }
+    public int Brightness { get { return dimmed ? dimmedFrom : brightness; } } // 降亮度期间显示原来的亮度
+    public int Contrast { get { return contrast; } }
+    public int Input { get { return input; } }
+    public List<int> Inputs { get { return inputs; } }
+    public bool DdcReading { get { return ddcReading; } }
     public int ProfileIndex { get { return profileIndex; } }
     public Icon AppIcon { get { return formIcon ?? iconActive; } }
     public string LatestVersion { get { return latestVersion; } }
@@ -198,6 +217,8 @@ class App : ApplicationContext
         vks.Add(cfg.PowerOffVk); mods.Add(cfg.PowerOffMods); actions.Add(PowerOffNow);
         vks.Add(cfg.IconsVk); mods.Add(cfg.IconsMods); actions.Add(ToggleDesktopIcons);
         vks.Add(cfg.HdrVk); mods.Add(cfg.HdrMods); actions.Add(ToggleHdr);
+        vks.Add(cfg.BrightUpVk); mods.Add(cfg.BrightUpMods); actions.Add(delegate { StepBrightness(BrightnessStep); });
+        vks.Add(cfg.BrightDownVk); mods.Add(cfg.BrightDownMods); actions.Add(delegate { StepBrightness(-BrightnessStep); });
         if (cfg.Profiles.Count > 0) { vks.Add(cfg.ToggleVk); mods.Add(cfg.ToggleMods); actions.Add(ToggleProfile); }
         foreach (var p in cfg.Profiles)
         {
@@ -345,6 +366,7 @@ class App : ApplicationContext
         {
             anchorX = x; anchorY = y;
             lastActivity = Environment.TickCount;
+            QueueUndim();
         }
         return false;
     }
@@ -394,6 +416,7 @@ class App : ApplicationContext
         else
         {
             lastActivity = Environment.TickCount;
+            QueueUndim(); // 排在快捷键动作前面, 调亮度快捷键会基于恢复后的亮度
             Action hotkey = isMod ? null : FindHotkey(vk, KeyCombo.CurrentMods(vk));
             if (hotkey != null)
             {
@@ -414,6 +437,8 @@ class App : ApplicationContext
         if (exceptKey != "poweroff" && KeyCombo.Same(mods, vk, cfg.PowerOffMods, cfg.PowerOffVk)) return "立即关闭显示器";
         if (exceptKey != "icons" && KeyCombo.Same(mods, vk, cfg.IconsMods, cfg.IconsVk)) return "显示/隐藏桌面图标";
         if (exceptKey != "hdr" && KeyCombo.Same(mods, vk, cfg.HdrMods, cfg.HdrVk)) return "开关 HDR";
+        if (exceptKey != "brightup" && KeyCombo.Same(mods, vk, cfg.BrightUpMods, cfg.BrightUpVk)) return "调亮";
+        if (exceptKey != "brightdown" && KeyCombo.Same(mods, vk, cfg.BrightDownMods, cfg.BrightDownVk)) return "调暗";
         foreach (var p in cfg.Profiles)
             if (p != exceptProfile && KeyCombo.Same(mods, vk, p.HotkeyMods, p.HotkeyVk)) return "模式「" + p.Name + "」";
         return null;
@@ -630,6 +655,8 @@ class App : ApplicationContext
             {
                 int idle = Since(lastActivity), timeout = timeoutSec * 1000;
                 int warn = Math.Min(cfg.WarnSec * 1000, timeout / 2);
+                // 闲置时先降亮度 (要早于黑屏才有意义)
+                if (cfg.DimAfterSec > 0 && !dimmed && brightness > cfg.DimLevel && cfg.DimAfterSec * 1000 < timeout && idle >= cfg.DimAfterSec * 1000) Dim();
                 if (idle >= timeout) ShowOverlay();
                 else if (warn > 0 && idle >= timeout - warn)
                 {
@@ -639,6 +666,16 @@ class App : ApplicationContext
             }
         }
         if (!warned) HideWarning();
+        // 兜底恢复亮度: 手柄、"不黑屏"的情况、黑屏唤醒、解锁等都会刷新 lastActivity (键鼠在钩子里已经即时恢复)
+        if (dimmed && !overlayVisible && !locked && Since(lastActivity) < Math.Max(1, cfg.DimAfterSec) * 1000) Undim();
+        // 日出日落时亮度逐步过渡, 每 2 秒调 5%
+        if (rampTarget >= 0 && !dimmed && brightness >= 0 && Since(lastRamp) >= 2000)
+        {
+            int next = rampTarget > brightness ? Math.Min(rampTarget, brightness + 5) : Math.Max(rampTarget, brightness - 5);
+            SetBrightness(next, false);
+            lastRamp = Environment.TickCount;
+            if (next == rampTarget) rampTarget = -1;
+        }
 
         if (Since(lastAutoCheck) >= 2000) CheckAutoSwitch();
         if (Since(lastSunCheck) >= 30000) CheckSunTheme();
@@ -697,6 +734,7 @@ class App : ApplicationContext
         catch { display = null; }
         try { hdrState = display == null ? null : DisplayController.GetHdr(display.Device); }
         catch { hdrState = null; }
+        if (display != null && display.Device != ddcDevice) RefreshDdc(); // 换了要控制的显示器
         profileIndex = display == null ? -1 : cfg.Profiles.FindIndex(p => DisplayController.Matches(display, p));
         lastTip = null;
         if (settings != null && settings.Visible) settings.UpdateLive();
@@ -721,7 +759,10 @@ class App : ApplicationContext
             var s = DisplayController.GetState(device);
             before = new DisplayProfile { Name = "之前的模式", Width = s.Width, Height = s.Height, RefreshRate = s.RefreshRate, Scale = s.Scale };
             if (p.Hdr != DisplayProfile.HdrKeep && hdrState != null) before.Hdr = hdrState.Value ? DisplayProfile.HdrOn : DisplayProfile.HdrOff; // 恢复时连 HDR 一起恢复
+            if (p.Brightness >= 0 && Brightness >= 0) before.Brightness = Brightness;
+            if (p.Brightness >= 0) { Undim(); rampTarget = -1; }
             DisplayController.Apply(device, p);
+            if (p.Brightness >= 0 && brightness >= 0 && device == ddcDevice) brightness = p.Brightness;
 
             // 第一次切到一个改变分辨率/刷新率的模式时让用户确认, 万一显示器没信号 15 秒后自动恢复 (自动切换也一样)
             bool modeChanged = s.Width != p.Width || s.Height != p.Height || (p.RefreshRate > 0 && Math.Abs(s.RefreshRate - p.RefreshRate) > 1);
@@ -774,6 +815,7 @@ class App : ApplicationContext
         try
         {
             DisplayController.Apply(DisplayController.ResolveDevice(cfg.DisplayDevice), before);
+            if (before.Brightness >= 0 && brightness >= 0) brightness = before.Brightness;
             tray.ShowBalloon(message, before.Describe(), TrayIcon.InfoInfo);
         }
         catch (Exception ex)
@@ -1099,6 +1141,16 @@ class App : ApplicationContext
         lastSunCheck = Environment.TickCount;
         bool light = cfg.HasLocation && Sun.IsDay(DateTime.Now, cfg.Latitude, cfg.Longitude);
         night = cfg.HasLocation && !light;
+        // 亮度和主题一样只在日出 / 日落那一刻调, 中途手动调过的亮度保持到下一次
+        if (!cfg.AutoBrightness || !cfg.HasLocation) sunBright = null;
+        else if (sunBright != light && brightness >= 0)
+        {
+            sunBright = light;
+            int target = light ? cfg.DayBrightness : cfg.NightBrightness;
+            if (dimmed) dimmedFrom = target; // 正在闲置降亮度: 恢复时直接回到新的亮度
+            else { rampTarget = target; lastRamp = 0; }
+            Log.Write("日" + (light ? "出" : "落") + ", 亮度调到 " + target + "%");
+        }
         if (!cfg.AutoTheme || !cfg.HasLocation) { sunLight = null; return; }
         if (sunLight == light) return;
         sunLight = light;
@@ -1116,6 +1168,129 @@ class App : ApplicationContext
     {
         sunLight = null;
         CheckSunTheme();
+    }
+
+    public void ApplySunBrightness()
+    {
+        sunBright = null;
+        rampTarget = -1;
+        CheckSunTheme();
+    }
+
+    // ---------- 显示器亮度 / 输入源 (DDC/CI) ----------
+
+    // 后台读取当前亮度、对比度、输入源; 输入源列表要读能力字符串, 一两秒, 同一台显示器只读一次
+    public void RefreshDdc()
+    {
+        if (ddcReading || display == null) return;
+        ddcReading = true;
+        string device = display.Device;
+        bool sameDevice = device == ddcDevice;
+        var knownInputs = sameDevice ? inputs : null;
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            int b = Ddc.GetPercent(device, Ddc.Brightness), c = b < 0 ? -1 : Ddc.GetPercent(device, Ddc.Contrast);
+            int cur, max, inp = b >= 0 && Ddc.Get(device, Ddc.Input, out cur, out max) ? cur & 0xFF : -1;
+            var list = b < 0 ? null : knownInputs ?? Ddc.Inputs(device);
+            invoker.BeginInvoke((Action)delegate
+            {
+                ddcReading = false;
+                ddcDevice = device;
+                if (!dimmed) brightness = b;
+                contrast = c;
+                input = inp;
+                inputs = list;
+                // 上次降了亮度没来得及恢复 (异常退出), 现在恢复
+                if (cfg.DimmedFrom >= 0 && b >= 0 && !dimmed)
+                {
+                    Log.Write("恢复上次闲置前的亮度 " + cfg.DimmedFrom + "%");
+                    SetBrightness(cfg.DimmedFrom, false);
+                    cfg.DimmedFrom = -1;
+                    cfg.Save();
+                }
+                lastSunCheck = unchecked(Environment.TickCount - 60000); // 读到亮度后再按日出日落检查一次
+                if (settings != null) settings.OnDdcRead();
+            });
+        });
+    }
+
+    public void SetBrightness(int percent, bool showOsd)
+    {
+        if (brightness < 0 || ddcDevice == null)
+        {
+            if (showOsd) ShowOsd("读不到显示器亮度（需要 DDC/CI）", -1);
+            return;
+        }
+        brightness = Math.Max(0, Math.Min(100, percent));
+        ddc.SetPercent(ddcDevice, Ddc.Brightness, brightness);
+        if (showOsd) ShowOsd("亮度", brightness);
+    }
+
+    public void SetContrast(int percent)
+    {
+        if (contrast < 0 || ddcDevice == null) return;
+        contrast = Math.Max(0, Math.Min(100, percent));
+        ddc.SetPercent(ddcDevice, Ddc.Contrast, contrast);
+    }
+
+    void StepBrightness(int delta)
+    {
+        rampTarget = -1; // 手动调过就不再自动过渡
+        SetBrightness(brightness + delta, true);
+    }
+
+    void ShowOsd(string caption, int percent)
+    {
+        if (osd == null) osd = new OsdForm();
+        Screen screen = null;
+        foreach (var s in Screen.AllScreens) if (ddcDevice != null && s.DeviceName == ddcDevice) screen = s;
+        osd.Popup(screen ?? Screen.PrimaryScreen, caption, percent);
+    }
+
+    // 闲置时降低亮度; 有操作 (钩子里即时, 或 Tick 兜底) 立即恢复
+    void Dim()
+    {
+        dimmedFrom = brightness;
+        cfg.DimmedFrom = dimmedFrom; // 万一程序异常退出, 下次启动能恢复
+        cfg.Save();
+        SetBrightness(cfg.DimLevel, false);
+        dimmed = true;
+    }
+
+    void QueueUndim()
+    {
+        if (!dimmed || undimQueued) return;
+        undimQueued = true;
+        invoker.BeginInvoke((Action)Undim);
+    }
+
+    void Undim()
+    {
+        undimQueued = false;
+        if (!dimmed) return;
+        dimmed = false;
+        SetBrightness(dimmedFrom, false);
+        cfg.DimmedFrom = -1;
+        cfg.Save();
+    }
+
+    // 切换显示器的输入源: 切走后这台电脑的画面就看不到了, 由调用方先确认
+    public void SwitchInput(int value)
+    {
+        if (ddcDevice == null) return;
+        string device = ddcDevice;
+        Log.Write("切换输入源到 " + Ddc.InputName(value));
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            if (!Ddc.Set(device, Ddc.Input, value)) Log.Write("切换输入源失败");
+        });
+        input = value;
+    }
+
+    public bool ConfirmSwitchInput(IWin32Window owner, int value)
+    {
+        return MessageBox.Show(owner, "切换到「" + Ddc.InputName(value) + "」后，这台电脑的画面会从显示器上消失，需要用显示器的按键（或另一台设备）切回来。\n\n继续？",
+            "切换输入源", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
     }
 
     // 夜间暖色: 日落后 / 日出后在 10 秒左右渐变到目标色温
@@ -1247,6 +1422,13 @@ class App : ApplicationContext
 
         m.Items.Add(Ui.Label("防烧屏：" + guardStatus));
         if (display != null) m.Items.Add(Ui.Label("显示：" + display.Describe()));
+        if (Brightness >= 0)
+        {
+            // 亮度滑块直接放在菜单里, 拖动时菜单不会关
+            var slider = new Slider(Brightness, Ui.S(240), "");
+            slider.ValueChanged += delegate { Undim(); rampTarget = -1; SetBrightness(slider.Value, false); };
+            m.Items.Add(new ToolStripControlHost(slider) { AutoSize = false, Size = slider.Size, Margin = new Padding(Ui.S(4), Ui.S(2), Ui.S(4), Ui.S(2)) });
+        }
         m.Items.Add(Ui.Separator());
 
         if (cfg.Profiles.Count > 0)
@@ -1267,6 +1449,18 @@ class App : ApplicationContext
         {
             var hdr = Ui.Item(m.Items, "HDR", hdrState.Value, delegate { ToggleHdr(); });
             if (cfg.HdrVk != 0) hdr.ShortcutKeyDisplayString = KeyCombo.Name(cfg.HdrMods, cfg.HdrVk);
+        }
+        if (inputs != null)
+        {
+            var sub = Ui.Sub(m.Items, "切换输入源");
+            foreach (int v in inputs)
+            {
+                int value = v;
+                Ui.Item(sub.DropDownItems, Ddc.InputName(value), value == input, delegate
+                {
+                    if (value != input && ConfirmSwitchInput(null, value)) SwitchInput(value);
+                });
+            }
         }
         // 手动切换: 开着日出日落自动切换时, 保持到下一次日出或日落
         bool light = SystemTheme.IsLight();
@@ -1374,6 +1568,14 @@ class App : ApplicationContext
         CursorHider.Restore();
         NightTint.Restore();
         HideWarning();
+        if (dimmed && ddcDevice != null)
+        {
+            // 后台写入线程随进程一起结束, 这里同步恢复
+            Ddc.SetPercent(ddcDevice, Ddc.Brightness, dimmedFrom);
+            cfg.DimmedFrom = -1;
+            cfg.Save();
+        }
+        if (osd != null) osd.Dispose();
         if (overlayVisible) HideOverlay();
         if (settings != null) settings.Close();
         tray.Remove();

@@ -143,6 +143,89 @@ class BlankForm : Form
     }
 }
 
+// 屏幕下方的亮度提示 (类似系统音量提示), 1.5 秒后消失; 不抢焦点、不挡鼠标
+class OsdForm : Form
+{
+    readonly Timer hideTimer = new Timer { Interval = 1500 };
+    string caption;
+    int percent;
+    float scale = 1;
+
+    public OsdForm()
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        StartPosition = FormStartPosition.Manual;
+        AutoScaleMode = AutoScaleMode.None;
+        ShowInTaskbar = false;
+        TopMost = true;
+        DoubleBuffered = true;
+        Opacity = 0.97; // 分层窗口, 配合 WS_EX_TRANSPARENT 才能让鼠标穿透
+        hideTimer.Tick += delegate { hideTimer.Stop(); Hide(); };
+    }
+
+    protected override bool ShowWithoutActivation { get { return true; } }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= 0x80 | 0x8 | 0x20 | 0x80000 | 0x08000000; // TOOLWINDOW | TOPMOST | TRANSPARENT | LAYERED | NOACTIVATE
+            return cp;
+        }
+    }
+
+    // percent < 0 时只显示文字 (比如"不支持")
+    public void Popup(Screen screen, string caption, int percent)
+    {
+        this.caption = caption;
+        this.percent = percent;
+        var wa = screen.WorkingArea;
+        scale = Math.Max(1f, Ui.DpiAt(new Point(wa.Left + wa.Width / 2, wa.Top + wa.Height / 2)) / 96f);
+        Size = new Size((int)(260 * scale), (int)(56 * scale));
+        Location = new Point(wa.Left + (wa.Width - Width) / 2, wa.Bottom - Height - (int)(56 * scale));
+        using (var path = Theme.RoundRect(new RectangleF(0, 0, Width, Height), 8 * scale)) Region = new Region(path);
+        BackColor = Theme.Card;
+        if (!Visible) Show();
+        Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0, Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
+        Invalidate();
+        hideTimer.Stop();
+        hideTimer.Start();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        g.Clear(Theme.Card);
+        var flags = TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+        using (var icons = new Font(Theme.Icons.FontFamily, 18 * scale, GraphicsUnit.Pixel))
+        using (var font = new Font(Theme.Font.FontFamily, 14 * scale, GraphicsUnit.Pixel))
+        {
+            TextRenderer.DrawText(g, "", icons, new Rectangle(0, 0, (int)(52 * scale), Height), Theme.Text, flags | TextFormatFlags.HorizontalCenter);
+            if (percent < 0)
+            {
+                TextRenderer.DrawText(g, caption, font, new Rectangle((int)(52 * scale), 0, Width - (int)(60 * scale), Height), Theme.Text, flags);
+                return;
+            }
+            float x0 = 52 * scale, w = Width - x0 - 64 * scale, cy = Height / 2f, th = 4 * scale;
+            using (var path = Theme.RoundRect(new RectangleF(x0, cy - th / 2, w, th), th / 2))
+            using (var b = new SolidBrush(Theme.ControlBorder)) g.FillPath(b, path);
+            float fill = w * percent / 100f;
+            if (fill > th)
+                using (var path = Theme.RoundRect(new RectangleF(x0, cy - th / 2, fill, th), th / 2))
+                using (var b = new SolidBrush(Theme.Accent)) g.FillPath(b, path);
+            TextRenderer.DrawText(g, percent.ToString(), font, new Rectangle(Width - (int)(56 * scale), 0, (int)(44 * scale), Height), Theme.Text, flags | TextFormatFlags.Right);
+        }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) hideTimer.Dispose();
+        base.Dispose(disposing);
+    }
+}
+
 // 黑屏前的提示: 半透明黑色逐渐加深, 中间显示倒计时. 鼠标键盘全部穿透, 不影响正在用的程序
 class WarnForm : Form
 {

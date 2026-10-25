@@ -76,6 +76,29 @@ static class Native
     public const uint SPI_SETCURSORS = 0x57, SPI_SETDESKWALLPAPER = 0x14, SPI_GETDESKWALLPAPER = 0x73;
     public const uint SPIF_UPDATEINIFILE = 1, SPIF_SENDCHANGE = 2;
 
+    // ---------- DDC/CI (显示器自身的亮度 / 对比度 / 输入源) ----------
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct PHYSICAL_MONITOR
+    {
+        public IntPtr hPhysicalMonitor;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string szPhysicalMonitorDescription;
+    }
+    [DllImport("dxva2.dll", SetLastError = true)]
+    public static extern bool GetNumberOfPhysicalMonitorsFromHMONITOR(IntPtr monitor, out uint count);
+    [DllImport("dxva2.dll", SetLastError = true)]
+    public static extern bool GetPhysicalMonitorsFromHMONITOR(IntPtr monitor, uint count, [Out] PHYSICAL_MONITOR[] monitors);
+    [DllImport("dxva2.dll")]
+    public static extern bool DestroyPhysicalMonitors(uint count, PHYSICAL_MONITOR[] monitors);
+    [DllImport("dxva2.dll", SetLastError = true)]
+    public static extern bool GetVCPFeatureAndVCPFeatureReply(IntPtr monitor, byte code, IntPtr type, out uint current, out uint max);
+    [DllImport("dxva2.dll", SetLastError = true)]
+    public static extern bool SetVCPFeature(IntPtr monitor, byte code, uint value);
+    [DllImport("dxva2.dll", SetLastError = true)]
+    public static extern bool GetCapabilitiesStringLength(IntPtr monitor, out uint length);
+    [DllImport("dxva2.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    public static extern bool CapabilitiesRequestAndCapabilitiesReply(IntPtr monitor, System.Text.StringBuilder caps, uint length);
+
     [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr CreateDC(string driver, string device, string output, IntPtr initData);
     [DllImport("gdi32.dll")]

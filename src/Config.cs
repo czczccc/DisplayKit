@@ -214,6 +214,7 @@ class DisplayProfile
     public bool Verified; // 用户已确认过这个模式能正常显示, 之后切换不再询问
     public const int HdrKeep = 0, HdrOn = 1, HdrOff = 2;
     public int Hdr = HdrKeep;
+    public int Brightness = -1; // 切换时把显示器亮度 (DDC/CI) 调到这个百分比, -1 = 不改
 
     public string Describe()
     {
@@ -222,6 +223,7 @@ class DisplayProfile
         if (Scale > 0) s += " · " + Scale + "%";
         if (Hdr == HdrOn) s += " · HDR 开";
         else if (Hdr == HdrOff) s += " · HDR 关";
+        if (Brightness >= 0) s += " · 亮度 " + Brightness + "%";
         return s;
     }
 
@@ -261,6 +263,10 @@ class Settings
     public int IconsVk, IconsMods;          // 显示/隐藏桌面图标
     public int CursorHideSec;               // 鼠标多久不动隐藏指针, 0 = 不隐藏
     public int WarnSec = 5;                 // 黑屏前几秒开始变暗提示, 0 = 不提示
+    public int DimAfterSec;                 // 闲置多久先把显示器亮度 (DDC/CI) 降下来, 0 = 不降
+    public int DimLevel = 20;               // 降到的亮度百分比
+    public int DimmedFrom = -1;             // 降亮度前的亮度; 程序异常退出没来得及恢复时, 下次启动据此恢复
+    public int BrightUpVk, BrightUpMods, BrightDownVk, BrightDownMods; // 调亮 / 调暗快捷键
     public bool ScheduleOn;                 // 时段规则: 某个时段内用另一个黑屏等待时间
     public int ScheduleStart = 23, ScheduleEnd = 7; // 整点, 可以跨午夜
     public int ScheduleTimeoutSec = 60;     // 时段内的黑屏等待时间, 0 = 不自动黑屏
@@ -279,10 +285,12 @@ class Settings
     public bool UseSystemLocation = true;   // 用 Windows 定位, 否则用手动填的坐标
     public double Latitude = double.NaN, Longitude = double.NaN; // 最近一次的位置, 定位失败时沿用
     public int NightKelvin;                 // 日落后屏幕色温, 0 = 不调
+    public bool AutoBrightness;             // 跟随日出日落调显示器亮度 (DDC/CI)
+    public int DayBrightness = 80, NightBrightness = 40;
     public string LightWallpaper = "", DarkWallpaper = ""; // 浅色/深色模式下的壁纸, 空 = 不换
 
     public bool HasLocation { get { return !double.IsNaN(Latitude) && !double.IsNaN(Longitude); } }
-    public bool NeedsLocation { get { return AutoTheme || NightKelvin > 0; } }
+    public bool NeedsLocation { get { return AutoTheme || NightKelvin > 0 || AutoBrightness; } }
 
     public static string FormatCoord(double v) { return v.ToString("0.####", CultureInfo.InvariantCulture); }
 
@@ -398,6 +406,11 @@ class Settings
             case "IconsKey": if (KeyCombo.Parse(v, out m, out n)) { IconsVk = n; IconsMods = m; } break;
             case "CursorHideSec": if (int.TryParse(v, out n) && n >= 0) CursorHideSec = n; break;
             case "WarnSec": if (int.TryParse(v, out n) && n >= 0) WarnSec = n; break;
+            case "DimAfterSec": if (int.TryParse(v, out n) && n >= 0) DimAfterSec = n; break;
+            case "DimLevel": if (int.TryParse(v, out n) && n >= 0 && n <= 100) DimLevel = n; break;
+            case "DimmedFrom": if (int.TryParse(v, out n) && n >= -1 && n <= 100) DimmedFrom = n; break;
+            case "BrightUpKey": if (KeyCombo.Parse(v, out m, out n)) { BrightUpVk = n; BrightUpMods = m; } break;
+            case "BrightDownKey": if (KeyCombo.Parse(v, out m, out n)) { BrightDownVk = n; BrightDownMods = m; } break;
             case "ScheduleOn": ScheduleOn = v == "1"; break;
             case "ScheduleStart": if (int.TryParse(v, out n) && n >= 0 && n < 24) ScheduleStart = n; break;
             case "ScheduleEnd": if (int.TryParse(v, out n) && n >= 0 && n < 24) ScheduleEnd = n; break;
@@ -433,6 +446,9 @@ class Settings
         int n;
         if (k == "AutoTheme") AutoTheme = v == "1";
         else if (k == "NightKelvin" && int.TryParse(v, out n) && (n == 0 || (n >= 3000 && n < 6500))) NightKelvin = n;
+        else if (k == "AutoBrightness") AutoBrightness = v == "1";
+        else if (k == "DayBrightness" && int.TryParse(v, out n) && n >= 0 && n <= 100) DayBrightness = n;
+        else if (k == "NightBrightness" && int.TryParse(v, out n) && n >= 0 && n <= 100) NightBrightness = n;
         else if (k == "LightWallpaper") LightWallpaper = v;
         else if (k == "DarkWallpaper") DarkWallpaper = v;
         else if (k == "UseSystemLocation") UseSystemLocation = v == "1";
@@ -450,6 +466,7 @@ class Settings
         else if (k == "AutoApps") p.AutoApps = DisplayProfile.SplitList(v);
         else if (k == "Verified") p.Verified = v == "1";
         else if (k == "Hdr" && int.TryParse(v, out n) && n >= 0 && n <= 2) p.Hdr = n;
+        else if (k == "Brightness" && int.TryParse(v, out n) && n >= -1 && n <= 100) p.Brightness = n;
     }
 
     public void Save()
@@ -473,6 +490,11 @@ class Settings
             sb.AppendLine("IconsKey=" + KeyCombo.Format(IconsMods, IconsVk));
             sb.AppendLine("CursorHideSec=" + CursorHideSec);
             sb.AppendLine("WarnSec=" + WarnSec);
+            sb.AppendLine("DimAfterSec=" + DimAfterSec);
+            sb.AppendLine("DimLevel=" + DimLevel);
+            sb.AppendLine("DimmedFrom=" + DimmedFrom);
+            sb.AppendLine("BrightUpKey=" + KeyCombo.Format(BrightUpMods, BrightUpVk));
+            sb.AppendLine("BrightDownKey=" + KeyCombo.Format(BrightDownMods, BrightDownVk));
             sb.AppendLine("ScheduleOn=" + (ScheduleOn ? "1" : "0"));
             sb.AppendLine("ScheduleStart=" + ScheduleStart);
             sb.AppendLine("ScheduleEnd=" + ScheduleEnd);
@@ -488,6 +510,9 @@ class Settings
             sb.AppendLine("UseSystemLocation=" + (UseSystemLocation ? "1" : "0"));
             sb.AppendLine("Location=" + (HasLocation ? FormatCoord(Latitude) + "," + FormatCoord(Longitude) : ""));
             sb.AppendLine("NightKelvin=" + NightKelvin);
+            sb.AppendLine("AutoBrightness=" + (AutoBrightness ? "1" : "0"));
+            sb.AppendLine("DayBrightness=" + DayBrightness);
+            sb.AppendLine("NightBrightness=" + NightBrightness);
             sb.AppendLine("LightWallpaper=" + LightWallpaper);
             sb.AppendLine("DarkWallpaper=" + DarkWallpaper);
             sb.AppendLine();
@@ -507,6 +532,7 @@ class Settings
                 sb.AppendLine("AutoApps=" + string.Join("|", p.AutoApps.ToArray()));
                 sb.AppendLine("Verified=" + (p.Verified ? "1" : "0"));
                 sb.AppendLine("Hdr=" + p.Hdr);
+                sb.AppendLine("Brightness=" + p.Brightness);
             }
             // 先写临时文件再替换, 写到一半断电/崩溃也不会把原来的配置弄坏
             string tmp = FilePath + ".tmp";

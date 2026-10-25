@@ -10,7 +10,9 @@ using System.Windows.Forms;
 class SettingsForm : Form, IKeyCapture
 {
     enum Page { Guard, Display, General }
-    const int TargetWake = 1, TargetBlank = 2, TargetToggle = 3, TargetPowerOff = 4, TargetIcons = 5, TargetHdr = 6;
+    const int TargetWake = 1, TargetBlank = 2, TargetToggle = 3, TargetPowerOff = 4, TargetIcons = 5, TargetHdr = 6, TargetBrightUp = 7, TargetBrightDown = 8;
+    static readonly int[] DimAfters = { 0, 30, 60, 120, 300 };
+    static readonly int[] Percents = { 0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100 };
     static readonly int[] CursorHides = { 0, 3, 5, 10, 30 };
     static readonly int[] Warns = { 0, 3, 5, 10 };
     static readonly int[] NightKelvins = { 0, 5500, 5000, 4500, 4000 };
@@ -93,6 +95,12 @@ class SettingsForm : Form, IKeyCapture
     public void RefreshGeneral()
     {
         if (page == Page.General && captureTarget == 0) Rebuild();
+    }
+
+    // 读到显示器的亮度 / 输入源后刷新显示模式页 (亮度相关的设置也在防烧屏页和外观里)
+    public void OnDdcRead()
+    {
+        if (captureTarget == 0) Rebuild();
     }
 
     void ApplyColors()
@@ -281,7 +289,7 @@ class SettingsForm : Form, IKeyCapture
     }
 
     // 可以清除 (不设快捷键) 的项
-    static bool Clearable(int target) { return target == TargetToggle || target == TargetPowerOff || target == TargetIcons || target == TargetHdr; }
+    static bool Clearable(int target) { return target != TargetWake && target != TargetBlank; }
 
     static string HotkeyKey(int target)
     {
@@ -291,6 +299,8 @@ class SettingsForm : Form, IKeyCapture
             case TargetPowerOff: return "poweroff";
             case TargetIcons: return "icons";
             case TargetHdr: return "hdr";
+            case TargetBrightUp: return "brightup";
+            case TargetBrightDown: return "brightdown";
         }
         return "toggle";
     }
@@ -305,6 +315,8 @@ class SettingsForm : Form, IKeyCapture
             case TargetPowerOff: cfg.PowerOffVk = vk; cfg.PowerOffMods = mods; break;
             case TargetIcons: cfg.IconsVk = vk; cfg.IconsMods = mods; break;
             case TargetHdr: cfg.HdrVk = vk; cfg.HdrMods = mods; break;
+            case TargetBrightUp: cfg.BrightUpVk = vk; cfg.BrightUpMods = mods; break;
+            case TargetBrightDown: cfg.BrightDownVk = vk; cfg.BrightDownMods = mods; break;
             default: cfg.ToggleVk = vk; cfg.ToggleMods = mods; break;
         }
     }
@@ -413,6 +425,15 @@ class SettingsForm : Form, IKeyCapture
             foreach (int sec in Warns) { int v = sec; Ui.Item(m.Items, WarnName(v), cfg.WarnSec == v, delegate { cfg.WarnSec = v; Changed(); }); }
             return m;
         }, S(150)));
+        c1.AddRow("闲置时先降低亮度", app.Brightness < 0 ? "需要显示器支持 DDC/CI（见「显示模式」页）" : "黑屏之前先调暗显示器背光，有操作立即恢复",
+            Drop(DimName(cfg.DimAfterSec), delegate
+            {
+                var m = Ui.Menu();
+                foreach (int sec in DimAfters) { int v = sec; Ui.Item(m.Items, DimName(v), cfg.DimAfterSec == v, delegate { cfg.DimAfterSec = v; Changed(); }).Enabled = v == 0 || v < cfg.TimeoutSec; }
+                return m;
+            }, S(150)));
+        if (cfg.DimAfterSec > 0)
+            c1.AddRow("降到", cfg.DimAfterSec >= cfg.TimeoutSec ? "要早于黑屏时间才会生效" : null, PercentDrop(cfg.DimLevel, false, v => cfg.DimLevel = v));
         if (Screen.AllScreens.Length > 1)
             c1.AddRow("黑屏的显示器", "只黑 OLED 屏，其他屏幕照常显示；关闭显示器会关掉全部屏幕", Drop(BlankDevicesName(), BlankDevicesMenu, S(150)));
         c1.AddRow("锁屏后关闭显示器", "锁屏界面也是静态画面，本程序无法覆盖", Drop(LockOffName(cfg.LockScreenOffSec), delegate
@@ -487,6 +508,19 @@ class SettingsForm : Form, IKeyCapture
     }
 
     static string WarnName(int sec) { return sec == 0 ? "不提示" : "提前 " + sec + " 秒"; }
+    static string DimName(int sec) { return sec == 0 ? "不降低" : TimeName(sec) + "后"; }
+
+    // 亮度百分比下拉; allowKeep = 有"不改"选项 (-1)
+    RoundButton PercentDrop(int value, bool allowKeep, Action<int> set)
+    {
+        return Drop(value < 0 ? "不改" : value + "%", delegate
+        {
+            var m = Ui.Menu();
+            if (allowKeep) Ui.Item(m.Items, "不改", value < 0, delegate { set(-1); Changed(); });
+            foreach (int p in Percents) { int v = p; Ui.Item(m.Items, v + "%", value == v, delegate { set(v); Changed(); }); }
+            return m;
+        }, S(150));
+    }
     static string HourName(int h) { return h.ToString("00") + ":00"; }
     static string ScheduleName(int sec) { return sec == 0 ? "不自动黑屏" : TimeName(sec) + "后黑屏"; }
 
@@ -634,6 +668,7 @@ class SettingsForm : Form, IKeyCapture
         }
         AddKeyHint(c1, TargetToggle, TargetHdr);
         y = Section("显示器", c1, y);
+        y = BuildHardware(y);
 
         var c2 = new Card(W);
         if (cfg.Profiles.Count == 0)
@@ -684,6 +719,46 @@ class SettingsForm : Form, IKeyCapture
         y += S(36);
         y += AddWrapped("也可以用命令行切换：DisplayKit.exe <模式名> 或 DisplayKit.exe --toggle，适合做成桌面快捷方式或给游戏启动器用。", Theme.Small, Theme.SubText, y).Height;
         return y;
+    }
+
+    // 显示器自身的设置 (DDC/CI): 亮度、对比度、输入源, 和按显示器菜单键一样
+    int BuildHardware(int y)
+    {
+        var cfg = app.Cfg;
+        var c = new Card(W);
+        if (app.Brightness < 0)
+            c.AddNote(app.DdcReading ? "正在读取显示器的亮度…"
+                : "读不到这台显示器的亮度。需要在显示器菜单里打开 DDC/CI；部分转接线、扩展坞和 VGA / DVI 连接不支持。", Theme.SubText);
+        else
+        {
+            var bright = new Slider(app.Brightness, S(260), null);
+            bright.ValueChanged += delegate { app.SetBrightness(bright.Value, false); };
+            c.AddRow("亮度", "显示器本身的背光亮度", bright);
+            if (app.Contrast >= 0)
+            {
+                var contrast = new Slider(app.Contrast, S(260), null);
+                contrast.ValueChanged += delegate { app.SetContrast(contrast.Value); };
+                c.AddRow("对比度", null, contrast);
+            }
+            if (app.Inputs != null)
+                c.AddRow("输入源", "切到其他输入后，这台电脑的画面会消失", Drop(app.Input >= 0 ? Ddc.InputName(app.Input) : "未知", delegate
+                {
+                    var m = Ui.Menu();
+                    foreach (int v in app.Inputs)
+                    {
+                        int value = v;
+                        Ui.Item(m.Items, Ddc.InputName(value), value == app.Input, delegate
+                        {
+                            if (value != app.Input && app.ConfirmSwitchInput(this, value)) { app.SwitchInput(value); Later(); }
+                        });
+                    }
+                    return m;
+                }, S(160)));
+        }
+        c.AddRow("调亮快捷键", "每次 10%，屏幕下方会显示当前亮度", KeyButton(TargetBrightUp, cfg.BrightUpMods, cfg.BrightUpVk));
+        c.AddRow("调暗快捷键", "托盘菜单里也有亮度滑块", KeyButton(TargetBrightDown, cfg.BrightDownMods, cfg.BrightDownVk));
+        AddKeyHint(c, TargetBrightUp, TargetBrightDown);
+        return Section("显示器亮度与输入源（DDC/CI）", c, y);
     }
 
     DisplayProfile NewFromCurrent()
@@ -838,6 +913,13 @@ class SettingsForm : Form, IKeyCapture
                 foreach (int k in NightKelvins) { int v = k; Ui.Item(m.Items, KelvinName(v), cfg.NightKelvin == v, delegate { cfg.NightKelvin = v; Changed(); }); }
                 return m;
             }, S(150)));
+        c.AddRow("跟随日出日落调亮度", app.Brightness < 0 ? "需要显示器支持 DDC/CI（见「显示模式」页）" : "调的是显示器背光；手动调过后到下次日出或日落再自动调",
+            Switch(cfg.AutoBrightness, v => { cfg.AutoBrightness = v; app.ApplySunBrightness(); Later(); }));
+        if (cfg.AutoBrightness)
+        {
+            c.AddRow("白天亮度", null, PercentDrop(cfg.DayBrightness, false, v => { cfg.DayBrightness = v; app.ApplySunBrightness(); }));
+            c.AddRow("夜间亮度", null, PercentDrop(cfg.NightBrightness, false, v => { cfg.NightBrightness = v; app.ApplySunBrightness(); }));
+        }
         if (cfg.NeedsLocation)
         {
             var source = Drop(cfg.UseSystemLocation ? "Windows 定位" : "手动输入", delegate
@@ -1099,6 +1181,14 @@ class ProfileEditor : Form, IKeyCapture
                 int v = h;
                 Ui.Item(m.Items, HdrName(v), Result.Hdr == v, delegate { Result.Hdr = v; Later(); });
             }
+            return m;
+        }, S(200)));
+
+        card.AddRow("亮度", "切换时把显示器背光调到这个亮度（需要 DDC/CI）", Drop(Result.Brightness < 0 ? "不改" : Result.Brightness + "%", delegate
+        {
+            var m = Ui.Menu();
+            Ui.Item(m.Items, "不改", Result.Brightness < 0, delegate { Result.Brightness = -1; Later(); });
+            for (int p = 0; p <= 100; p += 10) { int v = p; Ui.Item(m.Items, v + "%", Result.Brightness == v, delegate { Result.Brightness = v; Later(); }); }
             return m;
         }, S(200)));
 

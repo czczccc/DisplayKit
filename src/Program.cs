@@ -18,8 +18,19 @@ static class Program
 
         bool autostart = false, updated = false;
         var commands = new List<string>();
-        foreach (var a in args)
+        for (int i = 0; i < args.Length; i++)
         {
+            string a = args[i];
+            // 带一个值的命令: 调亮度 / 切输入源, 做完就退出
+            if (a == "--brightness" || a == "--input")
+            {
+                if (i + 1 >= args.Length)
+                {
+                    MessageBox.Show(a + " 后面需要一个值。\n\n" + Usage, "DisplayKit", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return 2;
+                }
+                return RunDdcCommand(a, args[i + 1]);
+            }
             if (a == "--autostart") autostart = true;
             else if (a == "--updated") updated = true; // 自动更新后由旧版本启动
             else if (a == "--help" || a == "-h" || a == "/?")
@@ -83,7 +94,42 @@ static class Program
         "  DisplayKit.exe            常驻托盘\n" +
         "  DisplayKit.exe 模式名     切换到指定模式后退出\n" +
         "  DisplayKit.exe --toggle   切换到下一个模式后退出\n" +
-        "  DisplayKit.exe --help     显示本说明";
+        "  DisplayKit.exe --brightness 50    把显示器亮度调到 50%（+10 / -10 为相对调整）\n" +
+        "  DisplayKit.exe --input hdmi1      切换输入源（dp1 / dp2 / hdmi1 / hdmi2 / usbc，或编号如 0x11）\n" +
+        "  DisplayKit.exe --help     显示本说明\n\n" +
+        "亮度和输入源通过 DDC/CI 控制\"要切换的显示器\"，需要显示器支持并在菜单里打开 DDC/CI。";
+
+    static int RunDdcCommand(string cmd, string value)
+    {
+        try
+        {
+            var cfg = Settings.Load();
+            string device = DisplayController.ResolveDevice(cfg.DisplayDevice);
+            int v;
+            if (cmd == "--input")
+            {
+                if (!Ddc.ParseInput(value, out v)) throw new ArgumentException("不认识的输入源：" + value);
+                if (!Ddc.Set(device, Ddc.Input, v)) throw new InvalidOperationException("切换输入源失败，显示器可能不支持 DDC/CI。");
+                return 0;
+            }
+            bool relative = value.StartsWith("+") || value.StartsWith("-");
+            if (!int.TryParse(value.TrimEnd('%'), out v)) throw new ArgumentException("亮度要写成数字，比如 50、+10、-10。");
+            if (relative)
+            {
+                int cur = Ddc.GetPercent(device, Ddc.Brightness);
+                if (cur < 0) throw new InvalidOperationException("读不到显示器亮度，显示器可能不支持 DDC/CI。");
+                v += cur;
+            }
+            if (!Ddc.SetPercent(device, Ddc.Brightness, Math.Max(0, Math.Min(100, v))))
+                throw new InvalidOperationException("设置亮度失败，显示器可能不支持 DDC/CI。");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "DisplayKit", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return 1;
+        }
+    }
 
     static int RunCommand(string arg)
     {
