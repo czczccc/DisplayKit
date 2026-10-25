@@ -54,7 +54,13 @@ static class Program
                 return 0;
             }
             Application.ThreadException += (s, e) => Log.Write("异常: " + e.Exception);
-            AppDomain.CurrentDomain.UnhandledException += (s, e) => Log.Write("未处理异常: " + e.ExceptionObject);
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                Log.Write("未处理异常: " + e.ExceptionObject);
+                // 进程要退出了: 别把透明指针和暖色调留在系统里
+                CursorHider.Restore();
+                NightTint.Restore();
+            };
             Application.Run(new App(autostart, updated, showSignal));
         }
         return 0;

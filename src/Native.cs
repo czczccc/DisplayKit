@@ -49,9 +49,41 @@ static class Native
     public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr SendMessageTimeout(IntPtr hWnd, int msg, IntPtr wParam, string lParam, uint flags, uint timeout, out IntPtr result);
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
     public static readonly IntPtr HWND_BROADCAST = new IntPtr(0xFFFF);
-    public const int WM_SETTINGCHANGE = 0x1A;
+    public const int WM_SETTINGCHANGE = 0x1A, WM_COMMAND = 0x111;
     public const uint SMTO_ABORTIFHUNG = 2;
+
+    // ---------- 桌面: 指针 / 桌面图标 / 壁纸 / 调色曲线 ----------
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr FindWindow(string cls, string title);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    public static extern bool SetSystemCursor(IntPtr cursor, uint id);
+    [DllImport("user32.dll")]
+    public static extern bool DestroyCursor(IntPtr cursor);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool SystemParametersInfo(uint action, uint param, IntPtr pv, uint winIni);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool SystemParametersInfo(uint action, uint param, string pv, uint winIni);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool SystemParametersInfo(uint action, uint param, System.Text.StringBuilder pv, uint winIni);
+    public const uint SPI_SETCURSORS = 0x57, SPI_SETDESKWALLPAPER = 0x14, SPI_GETDESKWALLPAPER = 0x73;
+    public const uint SPIF_UPDATEINIFILE = 1, SPIF_SENDCHANGE = 2;
+
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr CreateDC(string driver, string device, string output, IntPtr initData);
+    [DllImport("gdi32.dll")]
+    public static extern bool DeleteDC(IntPtr dc);
+    [DllImport("gdi32.dll")]
+    public static extern bool GetDeviceGammaRamp(IntPtr dc, [Out] ushort[] ramp);
+    [DllImport("gdi32.dll")]
+    public static extern bool SetDeviceGammaRamp(IntPtr dc, ushort[] ramp);
     [DllImport("user32.dll")]
     public static extern short GetAsyncKeyState(int vk);
     [DllImport("user32.dll")]

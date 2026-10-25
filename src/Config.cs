@@ -253,6 +253,9 @@ class Settings
     public int BlankVk = (int)Keys.B, BlankMods = KeyCombo.Ctrl | KeyCombo.Alt; // 立即黑屏, 默认 Ctrl+Alt+B
     public List<string> Whitelist = new List<string>(); // 进程名, 小写, 不含 .exe
     public List<string> BlankDevices = new List<string>(); // 要黑屏的显示器 (\\.\DISPLAYn), 空 = 全部
+    public int PowerOffVk, PowerOffMods;    // 立即关闭显示器
+    public int IconsVk, IconsMods;          // 显示/隐藏桌面图标
+    public int CursorHideSec;               // 鼠标多久不动隐藏指针, 0 = 不隐藏
     public int LockScreenOffSec = 10;   // 锁屏后多少秒关闭显示器, 0 = 不关
     public bool CheckUpdates = true;
     public bool AutoInstallUpdates = true; // 发现新版本后自动下载并重启到新版本
@@ -266,8 +269,11 @@ class Settings
     public bool AutoTheme;                  // 跟随日出日落切换深色/浅色
     public bool UseSystemLocation = true;   // 用 Windows 定位, 否则用手动填的坐标
     public double Latitude = double.NaN, Longitude = double.NaN; // 最近一次的位置, 定位失败时沿用
+    public int NightKelvin;                 // 日落后屏幕色温, 0 = 不调
+    public string LightWallpaper = "", DarkWallpaper = ""; // 浅色/深色模式下的壁纸, 空 = 不换
 
     public bool HasLocation { get { return !double.IsNaN(Latitude) && !double.IsNaN(Longitude); } }
+    public bool NeedsLocation { get { return AutoTheme || NightKelvin > 0; } }
 
     public static string FormatCoord(double v) { return v.ToString("0.####", CultureInfo.InvariantCulture); }
 
@@ -379,6 +385,9 @@ class Settings
             case "Gamepad": Gamepad = v == "1"; break;
             case "WakeKey": if (KeyCombo.Parse(v, out m, out n)) { WakeVk = n; WakeMods = m; } break;
             case "BlankKey": if (KeyCombo.Parse(v, out m, out n)) { BlankVk = n; BlankMods = m; } break;
+            case "PowerOffKey": if (KeyCombo.Parse(v, out m, out n)) { PowerOffVk = n; PowerOffMods = m; } break;
+            case "IconsKey": if (KeyCombo.Parse(v, out m, out n)) { IconsVk = n; IconsMods = m; } break;
+            case "CursorHideSec": if (int.TryParse(v, out n) && n >= 0) CursorHideSec = n; break;
             // v0.1 的写法
             case "WakeVk": if (int.TryParse(v, out n) && n > 0 && n < 256) WakeVk = n; break;
             case "WakeMods": if (int.TryParse(v, out n) && n >= 0 && n < 16) WakeMods = n; break;
@@ -406,7 +415,11 @@ class Settings
     void ReadAppearance(string k, string v)
     {
         double lat, lon;
+        int n;
         if (k == "AutoTheme") AutoTheme = v == "1";
+        else if (k == "NightKelvin" && int.TryParse(v, out n) && (n == 0 || (n >= 3000 && n < 6500))) NightKelvin = n;
+        else if (k == "LightWallpaper") LightWallpaper = v;
+        else if (k == "DarkWallpaper") DarkWallpaper = v;
         else if (k == "UseSystemLocation") UseSystemLocation = v == "1";
         else if (k == "Location" && ParseLocation(v, out lat, out lon)) { Latitude = lat; Longitude = lon; }
     }
@@ -440,6 +453,9 @@ class Settings
             sb.AppendLine("WakeMode=" + WakeMode);
             sb.AppendLine("WakeKey=" + KeyCombo.Format(WakeMods, WakeVk));
             sb.AppendLine("BlankKey=" + KeyCombo.Format(BlankMods, BlankVk));
+            sb.AppendLine("PowerOffKey=" + KeyCombo.Format(PowerOffMods, PowerOffVk));
+            sb.AppendLine("IconsKey=" + KeyCombo.Format(IconsMods, IconsVk));
+            sb.AppendLine("CursorHideSec=" + CursorHideSec);
             sb.AppendLine("Whitelist=" + string.Join("|", Whitelist.ToArray()));
             sb.AppendLine("BlankDevices=" + string.Join("|", BlankDevices.ToArray()));
             sb.AppendLine("LockScreenOffSec=" + LockScreenOffSec);
@@ -450,6 +466,9 @@ class Settings
             sb.AppendLine("AutoTheme=" + (AutoTheme ? "1" : "0"));
             sb.AppendLine("UseSystemLocation=" + (UseSystemLocation ? "1" : "0"));
             sb.AppendLine("Location=" + (HasLocation ? FormatCoord(Latitude) + "," + FormatCoord(Longitude) : ""));
+            sb.AppendLine("NightKelvin=" + NightKelvin);
+            sb.AppendLine("LightWallpaper=" + LightWallpaper);
+            sb.AppendLine("DarkWallpaper=" + DarkWallpaper);
             sb.AppendLine();
             sb.AppendLine("[Display]");
             sb.AppendLine("Device=" + DisplayDevice);

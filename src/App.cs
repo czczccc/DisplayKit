@@ -51,6 +51,9 @@ class App : ApplicationContext
     // 钩子线程只读快照 hooks / blankRects, 不碰 cfg 里的列表
     volatile int lastActivity = Environment.TickCount; // 最后一次"有效"操作
     volatile int lastRawInput = Environment.TickCount; // 最后一次任何输入(含抖动)
+    volatile int lastMouseInput = Environment.TickCount; // 最后一次有效的鼠标操作 (闲置隐藏指针用)
+    volatile bool cursorRestoreQueued;
+    bool powerOffNow; // 按了"立即关闭显示器": 黑屏后不等设置的时间, 松开按键就关
     volatile int anchorX, anchorY;
     volatile bool overlayVisible, dismissQueued;
     volatile int overlayShownAt;
@@ -88,6 +91,9 @@ class App : ApplicationContext
     int geoStartedAt;
     DateTime nextLocate = DateTime.Now.AddSeconds(5);
     string locationStatus;
+    bool night;                                 // 现在是日落到日出之间
+    double tintKelvin = NightTint.Neutral;      // 当前已应用的色温, 渐变用
+    int lastTintApply;
 
     SettingsForm settings;
     volatile IKeyCapture capture;
@@ -143,6 +149,8 @@ class App : ApplicationContext
         MigrateAutoStart();
         if (IsAutoStart()) SetAutoStart(true); // exe 换过位置时更新自启路径
         RefreshDisplay();
+        CursorHider.Restore();
+        ApplyWallpaper();
 
         // 旧版 OledGuard 还在运行的话, 两边的键盘钩子会抢同一组快捷键
         Mutex legacy;
@@ -180,6 +188,8 @@ class App : ApplicationContext
     {
         var vks = new List<int>(); var mods = new List<int>(); var actions = new List<Action>();
         vks.Add(cfg.BlankVk); mods.Add(cfg.BlankMods); actions.Add(ShowOverlay);
+        vks.Add(cfg.PowerOffVk); mods.Add(cfg.PowerOffMods); actions.Add(PowerOffNow);
+        vks.Add(cfg.IconsVk); mods.Add(cfg.IconsMods); actions.Add(ToggleDesktopIcons);
         if (cfg.Profiles.Count > 0) { vks.Add(cfg.ToggleVk); mods.Add(cfg.ToggleMods); actions.Add(ToggleProfile); }
         foreach (var p in cfg.Profiles)
         {
@@ -295,6 +305,16 @@ class App : ApplicationContext
             return true; // 吞掉被拦截点击对应的抬起
         }
 
+        if (meaningful)
+        {
+            lastMouseInput = Environment.TickCount;
+            if (CursorHider.Hidden && !cursorRestoreQueued)
+            {
+                cursorRestoreQueued = true;
+                invoker.BeginInvoke((Action)delegate { cursorRestoreQueued = false; CursorHider.Restore(); });
+            }
+        }
+
         if (overlayVisible)
         {
             if (meaningful) { anchorX = x; anchorY = y; }
@@ -383,6 +403,8 @@ class App : ApplicationContext
     {
         if (exceptKey != "blank" && KeyCombo.Same(mods, vk, cfg.BlankMods, cfg.BlankVk)) return "立即黑屏";
         if (exceptKey != "toggle" && KeyCombo.Same(mods, vk, cfg.ToggleMods, cfg.ToggleVk)) return "循环切换模式";
+        if (exceptKey != "poweroff" && KeyCombo.Same(mods, vk, cfg.PowerOffMods, cfg.PowerOffVk)) return "立即关闭显示器";
+        if (exceptKey != "icons" && KeyCombo.Same(mods, vk, cfg.IconsMods, cfg.IconsVk)) return "显示/隐藏桌面图标";
         foreach (var p in cfg.Profiles)
             if (p != exceptProfile && KeyCombo.Same(mods, vk, p.HotkeyMods, p.HotkeyVk)) return "模式「" + p.Name + "」";
         return null;
@@ -433,8 +455,23 @@ class App : ApplicationContext
         var p = Cursor.Position; anchorX = p.X; anchorY = p.Y;
         overlayShownAt = Environment.TickCount;
         monitorOffSent = false;
+        powerOffNow = false;
         dismissQueued = false;
         overlayVisible = true;
+    }
+
+    // 先黑屏再关闭显示器: 显示器被抖动唤醒时还是黑屏, 静止后会再关一次
+    public void PowerOffNow()
+    {
+        ShowOverlay();
+        if (!overlayVisible) return; // 锁屏时
+        powerOffNow = true;
+        monitorOffSent = false;
+    }
+
+    public void ToggleDesktopIcons()
+    {
+        if (!DesktopIcons.Toggle()) tray.ShowBalloon("找不到桌面窗口", "资源管理器可能没有在运行", TrayIcon.InfoWarning);
     }
 
     void HideOverlay()
@@ -515,11 +552,12 @@ class App : ApplicationContext
         if (overlayVisible)
         {
             foreach (var f in overlays) f.KeepOnTop();
-            // 可选: 黑屏一段时间后真正关闭显示器; 若被抖动唤醒(仍是黑屏), 静止 10 秒后再关一次
-            if (cfg.PowerOffMin > 0 && Since(overlayShownAt) >= cfg.PowerOffMin * 60000 && overlays.Count > 0)
+            // 黑屏一段时间后 (或按了"立即关闭显示器") 真正关闭显示器; 若被抖动唤醒(仍是黑屏), 静止 10 秒后再关一次
+            if ((powerOffNow || (cfg.PowerOffMin > 0 && Since(overlayShownAt) >= cfg.PowerOffMin * 60000)) && overlays.Count > 0)
             {
                 bool wokenSince = monitorOffSent && unchecked(lastRawInput - monitorOffAt) > 0;
-                if ((!monitorOffSent || wokenSince) && Since(lastRawInput) >= 10000)
+                int quiet = powerOffNow && !monitorOffSent ? 1000 : 10000; // 快捷键刚按下: 只等松开按键 (松键也会唤醒显示器)
+                if ((!monitorOffSent || wokenSince) && Since(lastRawInput) >= quiet)
                 {
                     tray.MonitorOff();
                     monitorOffSent = true;
@@ -548,7 +586,10 @@ class App : ApplicationContext
 
         if (Since(lastAutoCheck) >= 2000) CheckAutoSwitch();
         if (Since(lastSunCheck) >= 30000) CheckSunTheme();
-        if (cfg.AutoTheme && cfg.UseSystemLocation && geo == null && DateTime.Now >= nextLocate) Locate();
+        UpdateNightTint();
+        if (cfg.CursorHideSec > 0 && !CursorHider.Hidden && !overlayVisible && !locked && Since(lastMouseInput) >= cfg.CursorHideSec * 1000) CursorHider.Hide();
+        else if (cfg.CursorHideSec == 0 && CursorHider.Hidden) CursorHider.Restore();
+        if (cfg.NeedsLocation && cfg.UseSystemLocation && geo == null && DateTime.Now >= nextLocate) Locate();
         if (geo != null && Since(geoStartedAt) >= 60000) StopLocate("定位超时，" + (cfg.HasLocation ? "沿用上次的位置" : "请稍后重试或手动输入坐标"));
         if (cfg.CheckUpdates && DateTime.Now >= nextUpdateCheck)
         {
@@ -738,6 +779,7 @@ class App : ApplicationContext
             {
                 // 锁屏界面在黑屏窗口之上, 黑屏留着只会挡掉下面"锁屏后关闭显示器"的逻辑
                 HideOverlay();
+                CursorHider.Restore();
                 locked = true;
                 lockedAt = Environment.TickCount;
                 lockOffSent = false;
@@ -921,6 +963,8 @@ class App : ApplicationContext
         {
             if (overlayVisible) { HideOverlay(); ShowOverlay(); }
             if (!switching) RefreshDisplay();
+            lastTintApply = unchecked(Environment.TickCount - 10000); // 改分辨率会重置调色曲线, 马上重新设
+            lastSunCheck = unchecked(Environment.TickCount - 60000); // 睡眠唤醒也会触发, 顺便检查日出日落
         });
     }
 
@@ -934,6 +978,7 @@ class App : ApplicationContext
     {
         bool wasDark = Theme.Dark, wasLight = taskbarLight;
         Theme.Load();
+        if (wasDark != Theme.Dark) ApplyWallpaper();
         if (wasDark == Theme.Dark && wasLight == Theme.TaskbarLight()) return;
         ToolStripManager.Renderer = new ModernRenderer();
         MakeIcons();
@@ -948,8 +993,9 @@ class App : ApplicationContext
     void CheckSunTheme()
     {
         lastSunCheck = Environment.TickCount;
+        bool light = cfg.HasLocation && Sun.IsDay(DateTime.Now, cfg.Latitude, cfg.Longitude);
+        night = cfg.HasLocation && !light;
         if (!cfg.AutoTheme || !cfg.HasLocation) { sunLight = null; return; }
-        bool light = Sun.IsDay(DateTime.Now, cfg.Latitude, cfg.Longitude);
         if (sunLight == light) return;
         sunLight = light;
         if (SystemTheme.IsLight() == light) return;
@@ -966,6 +1012,37 @@ class App : ApplicationContext
     {
         sunLight = null;
         CheckSunTheme();
+    }
+
+    // 夜间暖色: 日落后 / 日出后在 10 秒左右渐变到目标色温
+    void UpdateNightTint()
+    {
+        double target = night && cfg.NightKelvin > 0 ? cfg.NightKelvin : NightTint.Neutral;
+        if (tintKelvin == target)
+        {
+            // 切换分辨率、全屏游戏、UAC 等会把调色曲线重置掉, 定时重新设一次
+            if (NightTint.Active && Since(lastTintApply) >= 10000)
+            {
+                NightTint.Apply(tintKelvin);
+                lastTintApply = Environment.TickCount;
+            }
+            return;
+        }
+        tintKelvin = target > tintKelvin ? Math.Min(target, tintKelvin + 100) : Math.Max(target, tintKelvin - 100);
+        if (tintKelvin >= NightTint.Neutral) NightTint.Restore();
+        else NightTint.Apply(tintKelvin);
+        lastTintApply = Environment.TickCount;
+    }
+
+    public bool NightTintFailed { get { return NightTint.Failed; } }
+
+    // 壁纸跟随当前的深浅色 (不管是自动切换还是手动改的主题)
+    public void ApplyWallpaper()
+    {
+        string want = SystemTheme.IsLight() ? cfg.LightWallpaper : cfg.DarkWallpaper;
+        if (want.Length == 0 || !File.Exists(want) || string.Equals(Wallpaper.Current(), want, StringComparison.OrdinalIgnoreCase)) return;
+        Wallpaper.Set(want);
+        Log.Write("更换壁纸: " + want);
     }
 
     // 用 Windows 定位服务取一次位置 (城市级精度就够), 之后每 6 小时更新
@@ -1022,6 +1099,7 @@ class App : ApplicationContext
         cfg.Save();
         RebuildHooks();
         lastActivity = Environment.TickCount;
+        lastSunCheck = unchecked(Environment.TickCount - 60000); // 外观设置下一次计时立即生效
         RefreshDisplay();
     }
 
@@ -1085,6 +1163,10 @@ class App : ApplicationContext
 
         var blank = Ui.Item(m.Items, "立即黑屏", false, delegate { ShowOverlay(); });
         blank.ShortcutKeyDisplayString = KeyCombo.Name(cfg.BlankMods, cfg.BlankVk);
+        var off = Ui.Item(m.Items, "立即关闭显示器", false, delegate { PowerOffNow(); });
+        if (cfg.PowerOffVk != 0) off.ShortcutKeyDisplayString = KeyCombo.Name(cfg.PowerOffMods, cfg.PowerOffVk);
+        var icons = Ui.Item(m.Items, DesktopIcons.Visible ? "隐藏桌面图标" : "显示桌面图标", false, delegate { ToggleDesktopIcons(); });
+        if (cfg.IconsVk != 0) icons.ShortcutKeyDisplayString = KeyCombo.Name(cfg.IconsMods, cfg.IconsVk);
         if (Paused) Ui.Item(m.Items, "恢复防烧屏", false, delegate { Resume(); });
         else
         {
@@ -1173,6 +1255,8 @@ class App : ApplicationContext
         SystemEvents.SessionSwitch -= OnSessionSwitch;
         StopHooks();
         StopLocate(null);
+        CursorHider.Restore();
+        NightTint.Restore();
         if (overlayVisible) HideOverlay();
         if (settings != null) settings.Close();
         tray.Remove();

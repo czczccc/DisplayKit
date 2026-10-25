@@ -10,7 +10,9 @@ using System.Windows.Forms;
 class SettingsForm : Form, IKeyCapture
 {
     enum Page { Guard, Display, General }
-    const int TargetWake = 1, TargetBlank = 2, TargetToggle = 3;
+    const int TargetWake = 1, TargetBlank = 2, TargetToggle = 3, TargetPowerOff = 4, TargetIcons = 5;
+    static readonly int[] CursorHides = { 0, 3, 5, 10, 30 };
+    static readonly int[] NightKelvins = { 0, 5500, 5000, 4500, 4000 };
     static readonly int[] Timeouts = { 30, 60, 120, 180, 300, 600, 900, 1800 };
     static readonly int[] PowerOffs = { 0, 1, 5, 15, 30, 60 };
     static readonly int[] Thresholds = { 20, 60, 150, 300 };
@@ -23,7 +25,7 @@ class SettingsForm : Form, IKeyCapture
     string keyHint;
     bool keyHintIsError;
     Label liveStatus, liveDisplay;
-    bool lastTrayOk;
+    bool lastTrayOk, lastIconsVisible;
     int lastProfileIndex = -2;
 
     public bool IsCapturing { get { return captureTarget != 0; } }
@@ -175,6 +177,7 @@ class SettingsForm : Form, IKeyCapture
         content.ResumeLayout();
         content.AutoScrollPosition = new Point(0, scrollY);
         lastTrayOk = app.TrayOk;
+        lastIconsVisible = DesktopIcons.Visible;
         lastProfileIndex = app.ProfileIndex;
         UpdateLive();
     }
@@ -182,7 +185,7 @@ class SettingsForm : Form, IKeyCapture
     // 定时刷新的状态文字
     public void UpdateLive()
     {
-        if (page == Page.Guard && lastTrayOk != app.TrayOk) { Rebuild(); return; }
+        if (page == Page.Guard && (lastTrayOk != app.TrayOk || lastIconsVisible != DesktopIcons.Visible) && captureTarget == 0) { Rebuild(); return; }
         if (page == Page.Display && lastProfileIndex != app.ProfileIndex && captureTarget == 0) { Rebuild(); return; }
         if (liveStatus != null) SetText(liveStatus, "当前状态：" + app.GuardStatus);
         if (liveDisplay != null)
@@ -268,7 +271,7 @@ class SettingsForm : Form, IKeyCapture
         b.Click += delegate
         {
             captureTarget = active ? 0 : target;
-            keyHint = active ? null : target == TargetToggle ? "按下新的快捷键，按 Backspace 清除。" : "按下新的按键或组合键。";
+            keyHint = active ? null : Clearable(target) ? "按下新的快捷键，按 Backspace 清除。" : "按下新的按键或组合键。";
             keyHintIsError = false;
             app.Capture = this;
             Later();
@@ -276,15 +279,40 @@ class SettingsForm : Form, IKeyCapture
         return b;
     }
 
-    public void OnCaptured(int mods, int vk)
+    // 可以清除 (不设快捷键) 的项
+    static bool Clearable(int target) { return target == TargetToggle || target == TargetPowerOff || target == TargetIcons; }
+
+    static string HotkeyKey(int target)
+    {
+        switch (target)
+        {
+            case TargetBlank: return "blank";
+            case TargetPowerOff: return "poweroff";
+            case TargetIcons: return "icons";
+        }
+        return "toggle";
+    }
+
+    void SetHotkey(int target, int mods, int vk)
     {
         var cfg = app.Cfg;
+        switch (target)
+        {
+            case TargetWake: cfg.WakeVk = vk; cfg.WakeMods = mods; cfg.WakeMode = Settings.WakeKey; break;
+            case TargetBlank: cfg.BlankVk = vk; cfg.BlankMods = mods; break;
+            case TargetPowerOff: cfg.PowerOffVk = vk; cfg.PowerOffMods = mods; break;
+            case TargetIcons: cfg.IconsVk = vk; cfg.IconsMods = mods; break;
+            default: cfg.ToggleVk = vk; cfg.ToggleMods = mods; break;
+        }
+    }
+
+    public void OnCaptured(int mods, int vk)
+    {
         int t = captureTarget;
         if (t == 0) return;
-        if (t == TargetToggle && mods == 0 && (vk == 0x08 || vk == 0x2E))
+        if (Clearable(t) && mods == 0 && (vk == 0x08 || vk == 0x2E))
         {
-            cfg.ToggleVk = 0;
-            cfg.ToggleMods = 0;
+            SetHotkey(t, 0, 0);
         }
         else
         {
@@ -292,7 +320,7 @@ class SettingsForm : Form, IKeyCapture
             if (t != TargetWake)
             {
                 err = KeyCombo.Validate(mods, vk);
-                string owner = err == null ? app.HotkeyOwner(mods, vk, t == TargetBlank ? "blank" : "toggle", null) : null;
+                string owner = err == null ? app.HotkeyOwner(mods, vk, HotkeyKey(t), null) : null;
                 if (owner != null) err = "这个快捷键已被「" + owner + "」使用，请换一个。";
             }
             if (err != null)
@@ -302,9 +330,7 @@ class SettingsForm : Form, IKeyCapture
                 Rebuild();
                 return;
             }
-            if (t == TargetWake) { cfg.WakeVk = vk; cfg.WakeMods = mods; cfg.WakeMode = Settings.WakeKey; }
-            else if (t == TargetBlank) { cfg.BlankVk = vk; cfg.BlankMods = mods; }
-            else { cfg.ToggleVk = vk; cfg.ToggleMods = mods; }
+            SetHotkey(t, mods, vk);
         }
         captureTarget = 0;
         keyHint = null;
@@ -402,8 +428,23 @@ class SettingsForm : Form, IKeyCapture
         c2.AddRow("唤醒按键", cfg.WakeMode == Settings.WakeKey ? "支持单键或组合键，比如空格、Ctrl+Shift+F12" : "唤醒方式为「仅指定按键」时使用",
             KeyButton(TargetWake, cfg.WakeMods, cfg.WakeVk));
         c2.AddRow("立即黑屏快捷键", "和唤醒按键设成同一个，就能一键切换黑屏/唤醒", KeyButton(TargetBlank, cfg.BlankMods, cfg.BlankVk));
-        AddKeyHint(c2, TargetWake, TargetBlank);
-        y = Section("唤醒", c2, y);
+        c2.AddRow("立即关闭显示器快捷键", "先黑屏再关闭显示器，离开前按一下；也在托盘菜单里", KeyButton(TargetPowerOff, cfg.PowerOffMods, cfg.PowerOffVk));
+        AddKeyHint(c2, TargetWake, TargetBlank, TargetPowerOff);
+        y = Section("唤醒与快捷键", c2, y);
+
+        var c4 = new Card(W);
+        c4.AddRow("鼠标指针闲置隐藏", "鼠标不动时隐藏指针，移动鼠标立即恢复", Drop(CursorHideName(cfg.CursorHideSec), delegate
+        {
+            var m = Ui.Menu();
+            foreach (int sec in CursorHides) { int v = sec; Ui.Item(m.Items, CursorHideName(v), cfg.CursorHideSec == v, delegate { cfg.CursorHideSec = v; Changed(); }); }
+            return m;
+        }, S(150)));
+        bool iconsVisible = DesktopIcons.Visible;
+        c4.AddRow("桌面图标", iconsVisible ? "桌面图标是长期不动的画面，可以隐藏" : "已隐藏，桌面右键「查看」里也能恢复",
+            Button(iconsVisible ? "隐藏" : "显示", false, delegate { app.ToggleDesktopIcons(); Later(); }));
+        c4.AddRow("显示/隐藏桌面图标快捷键", "也在托盘菜单里", KeyButton(TargetIcons, cfg.IconsMods, cfg.IconsVk));
+        AddKeyHint(c4, TargetIcons);
+        y = Section("减少静态画面", c4, y);
 
         var c3 = new Card(W);
         c3.AddRow("全屏应用", "看电影、玩游戏时", Switch(cfg.SkipFullscreen, v => cfg.SkipFullscreen = v));
@@ -418,6 +459,8 @@ class SettingsForm : Form, IKeyCapture
         y = Section("这些情况不黑屏", c3, y);
         return y;
     }
+
+    static string CursorHideName(int sec) { return sec == 0 ? "不隐藏" : sec + " 秒后"; }
 
     static readonly int[] LockOffs = { 0, 3, 10, 60, 300 };
 
@@ -735,7 +778,14 @@ class SettingsForm : Form, IKeyCapture
         var c = new Card(W);
         c.AddRow("跟随日出日落切换深浅色", "白天浅色、日落后深色；手动改过后到下次日出或日落再自动切换",
             Switch(cfg.AutoTheme, v => { cfg.AutoTheme = v; app.ApplySunTheme(); Later(); }));
-        if (cfg.AutoTheme)
+        c.AddRow("夜间暖色", app.NightTintFailed ? "显示器不接受调色（开着 HDR 时无效）" : "日落到日出之间把屏幕调暖；别和 Windows 夜间模式同时开",
+            Drop(KelvinName(cfg.NightKelvin), delegate
+            {
+                var m = Ui.Menu();
+                foreach (int k in NightKelvins) { int v = k; Ui.Item(m.Items, KelvinName(v), cfg.NightKelvin == v, delegate { cfg.NightKelvin = v; Changed(); }); }
+                return m;
+            }, S(150)));
+        if (cfg.NeedsLocation)
         {
             var source = Drop(cfg.UseSystemLocation ? "Windows 定位" : "手动输入", delegate
             {
@@ -764,10 +814,49 @@ class SettingsForm : Form, IKeyCapture
                 c.AddRow("坐标", "纬度, 经度，比如上海是 31.23, 121.47", field);
                 if (coordError != null) c.AddNote(coordError, Theme.Warn);
             }
-            c.AddRow(SunSummary(), cfg.HasLocation ? "白天和晚上的主题会在日出、日落时自动切换" : "有了位置后才会自动切换",
-                Button("立即应用", false, delegate { app.ApplySunTheme(); Later(); }));
+            string sub = cfg.HasLocation ? "到日出、日落时自动切换" : "有了位置后才会自动切换";
+            if (cfg.AutoTheme)
+                c.AddRow(SunSummary(), sub, Button("立即应用", false, delegate { app.ApplySunTheme(); Later(); }));
+            else
+                c.AddRow(SunSummary(), sub, null);
         }
+        WallpaperRow(c, "浅色模式壁纸", cfg.LightWallpaper, v => cfg.LightWallpaper = v);
+        WallpaperRow(c, "深色模式壁纸", cfg.DarkWallpaper, v => cfg.DarkWallpaper = v);
         return Section("外观", c, y);
+    }
+
+    static string KelvinName(int k)
+    {
+        switch (k)
+        {
+            case 0: return "关闭";
+            case 5500: return "微暖 · 5500K";
+            case 5000: return "较暖 · 5000K";
+            case 4500: return "暖 · 4500K";
+            case 4000: return "很暖 · 4000K";
+        }
+        return k + "K";
+    }
+
+    // 深浅色切换时 (自动或手动) 换成对应的壁纸
+    void WallpaperRow(Card c, string title, string path, Action<string> set)
+    {
+        string sub = path.Length == 0 ? "不更换" : File.Exists(path) ? Path.GetFileName(path) : "文件不见了：" + Path.GetFileName(path);
+        var pick = Button("选择…", false, delegate
+        {
+            using (var ofd = new OpenFileDialog { Title = "选择" + title, Filter = "图片 (*.jpg;*.jpeg;*.png;*.bmp)|*.jpg;*.jpeg;*.png;*.bmp" })
+            {
+                if (path.Length > 0 && File.Exists(path)) ofd.InitialDirectory = Path.GetDirectoryName(path);
+                if (ofd.ShowDialog(this) != DialogResult.OK) return;
+                set(ofd.FileName);
+            }
+            app.Save();
+            app.ApplyWallpaper();
+            Later();
+        });
+        Control right = pick;
+        if (path.Length > 0) right = Ui.Group(pick, Button("清除", false, delegate { set(""); Changed(); }));
+        c.AddRow(title, sub, right);
     }
 
     void CommitCoord(string text)
