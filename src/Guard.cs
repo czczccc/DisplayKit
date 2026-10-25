@@ -142,3 +142,50 @@ class BlankForm : Form
         Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0, Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
     }
 }
+
+// 黑屏前的提示: 半透明黑色逐渐加深, 中间显示倒计时. 鼠标键盘全部穿透, 不影响正在用的程序
+class WarnForm : Form
+{
+    readonly Label text;
+
+    public WarnForm(Rectangle bounds)
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        StartPosition = FormStartPosition.Manual;
+        AutoScaleMode = AutoScaleMode.None;
+        BackColor = Color.Black;
+        ShowInTaskbar = false;
+        TopMost = true;
+        Bounds = bounds;
+        Opacity = 0;
+        text = new Label
+        {
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleCenter,
+            ForeColor = Color.FromArgb(220, 220, 220),
+            BackColor = Color.Black,
+            Font = new Font("Microsoft YaHei UI", Math.Max(16, bounds.Height / 36), GraphicsUnit.Pixel),
+        };
+        Controls.Add(text);
+    }
+
+    protected override bool ShowWithoutActivation { get { return true; } }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= 0x80 | 0x8 | 0x20 | 0x80000 | 0x08000000; // TOOLWINDOW | TOPMOST | TRANSPARENT | LAYERED | NOACTIVATE
+            return cp;
+        }
+    }
+
+    // progress: 0 → 1 表示从开始提示到黑屏
+    public void SetProgress(double progress, int secondsLeft)
+    {
+        Opacity = 0.3 + 0.45 * Math.Max(0, Math.Min(1, progress));
+        string s = secondsLeft + " 秒后黑屏\n动一下鼠标或按任意键取消";
+        if (text.Text != s) text.Text = s;
+    }
+}

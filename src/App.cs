@@ -4,9 +4,11 @@ using System.Device.Location;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -22,7 +24,7 @@ interface IKeyCapture
 
 class App : ApplicationContext
 {
-    public const string Version = "1.3.0";
+    public const string Version = "1.4.0";
     public const string Repo = "czczccc/DisplayKit";
     public static string RepoUrl { get { return "https://github.com/" + Repo; } }
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -36,6 +38,7 @@ class App : ApplicationContext
     readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
     readonly Control invoker = new Control();
     readonly List<BlankForm> overlays = new List<BlankForm>();
+    readonly List<WarnForm> warnings = new List<WarnForm>();
     readonly AudioMeter audio = new AudioMeter();
     readonly GamepadWatcher gamepad = new GamepadWatcher();
     readonly Native.HookProc mouseProc, keyProc; // 保持引用, 防止被 GC
@@ -71,6 +74,7 @@ class App : ApplicationContext
 
     // 显示模式状态
     DisplayState display;
+    bool? hdrState; // 要切换的显示器的 HDR 状态, null = 不支持
     int profileIndex = -1;
     bool switching, confirming;
     int lastAutoCheck = Environment.TickCount;
@@ -79,7 +83,9 @@ class App : ApplicationContext
 
     // 检查更新
     DateTime nextUpdateCheck = DateTime.Now.AddSeconds(15);
-    string latestVersion, latestUrl, updateStatus;
+    const int AutoInstallDelayHours = 24; // 新版本发布满这么久才自动安装, 有问题的版本来得及撤下
+    string latestVersion, latestUrl, latestHashUrl, updateStatus;
+    DateTime latestPublished = DateTime.MinValue; // UTC
     bool updateChecking, updating, autoInstallPending;
     string autoInstallFailed; // 自动安装失败过的版本, 不再自动重试
     Icon formIcon;
@@ -105,6 +111,7 @@ class App : ApplicationContext
     public bool TrayOk { get { return tray.Added; } }
     public string GuardStatus { get { return guardStatus; } }
     public DisplayState Display { get { return display; } }
+    public bool? HdrState { get { return hdrState; } }
     public int ProfileIndex { get { return profileIndex; } }
     public Icon AppIcon { get { return formIcon ?? iconActive; } }
     public string LatestVersion { get { return latestVersion; } }
@@ -190,6 +197,7 @@ class App : ApplicationContext
         vks.Add(cfg.BlankVk); mods.Add(cfg.BlankMods); actions.Add(ShowOverlay);
         vks.Add(cfg.PowerOffVk); mods.Add(cfg.PowerOffMods); actions.Add(PowerOffNow);
         vks.Add(cfg.IconsVk); mods.Add(cfg.IconsMods); actions.Add(ToggleDesktopIcons);
+        vks.Add(cfg.HdrVk); mods.Add(cfg.HdrMods); actions.Add(ToggleHdr);
         if (cfg.Profiles.Count > 0) { vks.Add(cfg.ToggleVk); mods.Add(cfg.ToggleMods); actions.Add(ToggleProfile); }
         foreach (var p in cfg.Profiles)
         {
@@ -405,6 +413,7 @@ class App : ApplicationContext
         if (exceptKey != "toggle" && KeyCombo.Same(mods, vk, cfg.ToggleMods, cfg.ToggleVk)) return "循环切换模式";
         if (exceptKey != "poweroff" && KeyCombo.Same(mods, vk, cfg.PowerOffMods, cfg.PowerOffVk)) return "立即关闭显示器";
         if (exceptKey != "icons" && KeyCombo.Same(mods, vk, cfg.IconsMods, cfg.IconsVk)) return "显示/隐藏桌面图标";
+        if (exceptKey != "hdr" && KeyCombo.Same(mods, vk, cfg.HdrMods, cfg.HdrVk)) return "开关 HDR";
         foreach (var p in cfg.Profiles)
             if (p != exceptProfile && KeyCombo.Same(mods, vk, p.HotkeyMods, p.HotkeyVk)) return "模式「" + p.Name + "」";
         return null;
@@ -441,6 +450,7 @@ class App : ApplicationContext
     void ShowOverlay()
     {
         if (overlayVisible || locked) return;
+        HideWarning();
         var targets = BlankTargets();
         var rects = new List<Rectangle>();
         foreach (var s in targets)
@@ -458,6 +468,39 @@ class App : ApplicationContext
         powerOffNow = false;
         dismissQueued = false;
         overlayVisible = true;
+    }
+
+    // 黑屏前的提示: 要黑的屏幕逐渐变暗并倒计时, 鼠标键盘穿透, 动一下 lastActivity 就会刷新, 提示随之消失
+    void ShowWarning(double progress, int secondsLeft)
+    {
+        if (warnings.Count == 0)
+            foreach (var s in BlankTargets())
+            {
+                var f = new WarnForm(s.Bounds);
+                f.Show();
+                warnings.Add(f);
+            }
+        foreach (var f in warnings) f.SetProgress(progress, secondsLeft);
+    }
+
+    void HideWarning()
+    {
+        if (warnings.Count == 0) return;
+        foreach (var f in warnings) { f.Close(); f.Dispose(); }
+        warnings.Clear();
+    }
+
+    // 时段规则: 当前生效的黑屏等待秒数, 0 = 这个时段不自动黑屏
+    public int EffectiveTimeoutSec()
+    {
+        return InSchedule(DateTime.Now) ? cfg.ScheduleTimeoutSec : cfg.TimeoutSec;
+    }
+
+    public bool InSchedule(DateTime now)
+    {
+        int s = cfg.ScheduleStart, e = cfg.ScheduleEnd, h = now.Hour;
+        if (!cfg.ScheduleOn || s == e) return false;
+        return s < e ? h >= s && h < e : h >= s || h < e; // 比如 23 点到 7 点跨午夜
     }
 
     // 先黑屏再关闭显示器: 显示器被抖动唤醒时还是黑屏, 静止后会再关一次
@@ -575,14 +618,27 @@ class App : ApplicationContext
                 lockOffSent = true;
             }
         }
-        else if (!paused)
+        int timeoutSec = EffectiveTimeoutSec();
+        bool warned = false;
+        if (overlayVisible || locked || paused) { }
+        else
         {
-            keepAwakeReason = KeepAwakeReason(fullscreen);
+            keepAwakeReason = KeepAwakeReason(fullscreen) ?? (timeoutSec == 0 ? "时段规则" : null);
             if (keepAwakeReason != null)
                 lastActivity = Environment.TickCount;
-            else if (Since(lastActivity) >= cfg.TimeoutSec * 1000)
-                ShowOverlay();
+            else
+            {
+                int idle = Since(lastActivity), timeout = timeoutSec * 1000;
+                int warn = Math.Min(cfg.WarnSec * 1000, timeout / 2);
+                if (idle >= timeout) ShowOverlay();
+                else if (warn > 0 && idle >= timeout - warn)
+                {
+                    ShowWarning((double)(idle - (timeout - warn)) / warn, (timeout - idle + 999) / 1000);
+                    warned = true;
+                }
+            }
         }
+        if (!warned) HideWarning();
 
         if (Since(lastAutoCheck) >= 2000) CheckAutoSwitch();
         if (Since(lastSunCheck) >= 30000) CheckSunTheme();
@@ -597,7 +653,7 @@ class App : ApplicationContext
             CheckForUpdate(false);
         }
         // 自动更新: 等键鼠停一会儿 (但要赶在黑屏之前) 再装, 别在打字时突然重启
-        if (autoInstallPending && !updating && SafeToRestart() && Since(lastRawInput) >= Math.Min(30, cfg.TimeoutSec / 2) * 1000)
+        if (autoInstallPending && ReleaseAged && !updating && SafeToRestart() && Since(lastRawInput) >= Math.Min(30, cfg.TimeoutSec / 2) * 1000)
             InstallUpdate();
 
         if (overlayVisible) guardStatus = "黑屏中";
@@ -606,7 +662,7 @@ class App : ApplicationContext
         else if (keepAwakeReason != null) guardStatus = "不黑屏（" + keepAwakeReason + "）";
         else
         {
-            int left = Math.Max(0, cfg.TimeoutSec - Since(lastActivity) / 1000);
+            int left = Math.Max(0, timeoutSec - Since(lastActivity) / 1000);
             guardStatus = string.Format("{0}:{1:00} 后黑屏", left / 60, left % 60);
         }
 
@@ -639,6 +695,8 @@ class App : ApplicationContext
     {
         try { display = DisplayController.GetState(DisplayController.ResolveDevice(cfg.DisplayDevice)); }
         catch { display = null; }
+        try { hdrState = display == null ? null : DisplayController.GetHdr(display.Device); }
+        catch { hdrState = null; }
         profileIndex = display == null ? -1 : cfg.Profiles.FindIndex(p => DisplayController.Matches(display, p));
         lastTip = null;
         if (settings != null && settings.Visible) settings.UpdateLive();
@@ -662,6 +720,7 @@ class App : ApplicationContext
             string device = DisplayController.ResolveDevice(cfg.DisplayDevice);
             var s = DisplayController.GetState(device);
             before = new DisplayProfile { Name = "之前的模式", Width = s.Width, Height = s.Height, RefreshRate = s.RefreshRate, Scale = s.Scale };
+            if (p.Hdr != DisplayProfile.HdrKeep && hdrState != null) before.Hdr = hdrState.Value ? DisplayProfile.HdrOn : DisplayProfile.HdrOff; // 恢复时连 HDR 一起恢复
             DisplayController.Apply(device, p);
 
             // 第一次切到一个改变分辨率/刷新率的模式时让用户确认, 万一显示器没信号 15 秒后自动恢复 (自动切换也一样)
@@ -721,6 +780,24 @@ class App : ApplicationContext
         {
             Log.Write("恢复显示模式失败: " + ex.Message);
             tray.ShowBalloon("恢复显示模式失败", ex.Message, TrayIcon.InfoError);
+        }
+        RefreshDisplay();
+    }
+
+    public void ToggleHdr()
+    {
+        RefreshDisplay();
+        try
+        {
+            if (hdrState == null) throw new InvalidOperationException("这台显示器不支持 HDR（或显卡驱动没有开放）。");
+            bool on = !hdrState.Value;
+            DisplayController.SetHdr(DisplayController.ResolveDevice(cfg.DisplayDevice), on);
+            tray.ShowBalloon("HDR 已" + (on ? "开启" : "关闭"), display != null ? display.Describe() : "", TrayIcon.InfoInfo);
+        }
+        catch (Exception ex)
+        {
+            Log.Write("切换 HDR 失败: " + ex.Message);
+            tray.ShowBalloon("切换 HDR 失败", ex.Message, TrayIcon.InfoError);
         }
         RefreshDisplay();
     }
@@ -803,7 +880,8 @@ class App : ApplicationContext
         updateStatus = "正在检查…";
         ThreadPool.QueueUserWorkItem(delegate
         {
-            string tag = null, url = null, error = null;
+            string tag = null, url = null, hashUrl = null, error = null;
+            DateTime published = DateTime.MinValue;
             try
             {
                 using (var wc = NewWebClient())
@@ -814,10 +892,14 @@ class App : ApplicationContext
                     else error = "没有找到版本信息";
                     var a = Regex.Match(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]+/DisplayKit\\.exe)\"", RegexOptions.IgnoreCase);
                     if (a.Success) url = a.Groups[1].Value;
+                    var h = Regex.Match(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]+/DisplayKit\\.exe\\.sha256)\"", RegexOptions.IgnoreCase);
+                    if (h.Success) hashUrl = h.Groups[1].Value;
+                    var p = Regex.Match(json, "\"published_at\"\\s*:\\s*\"([^\"]+)\"");
+                    if (p.Success) DateTime.TryParse(p.Groups[1].Value, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out published);
                 }
             }
             catch (Exception ex) { error = ex.Message; }
-            invoker.BeginInvoke((Action)delegate { OnUpdateChecked(tag, url, error, manual); });
+            invoker.BeginInvoke((Action)delegate { OnUpdateChecked(tag, url, hashUrl, published, error, manual); });
         });
     }
 
@@ -829,7 +911,9 @@ class App : ApplicationContext
         return wc;
     }
 
-    void OnUpdateChecked(string tag, string url, string error, bool manual)
+    bool ReleaseAged { get { return DateTime.UtcNow - latestPublished >= TimeSpan.FromHours(AutoInstallDelayHours); } }
+
+    void OnUpdateChecked(string tag, string url, string hashUrl, DateTime published, string error, bool manual)
     {
         updateChecking = false;
         if (error != null)
@@ -842,14 +926,19 @@ class App : ApplicationContext
             bool first = latestVersion != tag;
             latestVersion = tag;
             latestUrl = url;
+            latestHashUrl = hashUrl;
+            latestPublished = published;
             updateStatus = "发现新版本 v" + tag;
-            if (cfg.AutoInstallUpdates && url != null && autoInstallFailed != tag)
+            bool canInstall = url != null && hashUrl != null;
+            if (cfg.AutoInstallUpdates && canInstall && autoInstallFailed != tag)
             {
                 autoInstallPending = true; // 等到合适的时机 (见 Tick) 再装
-                Log.Write("发现新版本 v" + tag + ", 准备自动更新");
+                Log.Write("发现新版本 v" + tag + (ReleaseAged ? ", 准备自动更新" : ", 发布满 " + AutoInstallDelayHours + " 小时后自动更新"));
+                if (first && !ReleaseAged)
+                    tray.ShowBalloon("DisplayKit 有新版本 v" + tag, "发布满一天后会自动安装，点击这里现在就更新", TrayIcon.InfoInfo, "update");
             }
             else if (first)
-                tray.ShowBalloon("DisplayKit 有新版本 v" + tag, url != null ? "点击这里立即更新" : "到 GitHub 下载新版本", TrayIcon.InfoInfo, "update");
+                tray.ShowBalloon("DisplayKit 有新版本 v" + tag, canInstall ? "点击这里立即更新" : "到 GitHub 下载新版本", TrayIcon.InfoInfo, "update");
         }
         else
         {
@@ -870,11 +959,12 @@ class App : ApplicationContext
     {
         autoInstallPending = false;
         if (updating || latestVersion == null) return;
-        if (latestUrl == null) { OpenUrl(RepoUrl + "/releases/latest"); return; }
+        // 没有校验文件的发布不自动替换, 打开发布页让用户自己下载
+        if (latestUrl == null || latestHashUrl == null) { OpenUrl(RepoUrl + "/releases/latest"); return; }
         updating = true;
         updateStatus = "正在下载 v" + latestVersion + "…";
         if (settings != null) settings.RefreshGeneral();
-        string tag = latestVersion, url = latestUrl, newPath = ExePath + ".new";
+        string tag = latestVersion, url = latestUrl, hashUrl = latestHashUrl, newPath = ExePath + ".new";
         bool auto = !(settings != null && settings.Visible);
         ThreadPool.QueueUserWorkItem(delegate
         {
@@ -882,7 +972,14 @@ class App : ApplicationContext
             try
             {
                 File.Delete(newPath);
-                using (var wc = NewWebClient()) wc.DownloadFile(url, newPath);
+                string expected;
+                using (var wc = NewWebClient())
+                {
+                    // 校验文件格式同 sha256sum: "<哈希>  DisplayKit.exe"
+                    expected = wc.DownloadString(hashUrl).Trim().Split(' ', '\t')[0].ToLowerInvariant();
+                    wc.DownloadFile(url, newPath);
+                }
+                if (Sha256(newPath) != expected) throw new InvalidDataException("下载的文件校验不通过，可能下载不完整");
                 // 文件版本必须和发布标签一致, 防止下载不完整或拿错文件
                 string v = FileVersionInfo.GetVersionInfo(newPath).ProductVersion;
                 if (v != tag) throw new InvalidDataException("下载的文件版本不对（" + (v ?? "无版本信息") + "）");
@@ -943,6 +1040,13 @@ class App : ApplicationContext
                 catch { Thread.Sleep(1000); }
             }
         });
+    }
+
+    static string Sha256(string path)
+    {
+        using (var sha = SHA256.Create())
+        using (var f = File.OpenRead(path))
+            return BitConverter.ToString(sha.ComputeHash(f)).Replace("-", "").ToLowerInvariant();
     }
 
     static bool IsNewer(string remote, string local)
@@ -1158,8 +1262,20 @@ class App : ApplicationContext
                 var t = Ui.Item(m.Items, "切换到下一个模式", false, delegate { ToggleProfile(); });
                 if (cfg.ToggleVk != 0) t.ShortcutKeyDisplayString = KeyCombo.Name(cfg.ToggleMods, cfg.ToggleVk);
             }
-            m.Items.Add(Ui.Separator());
         }
+        if (hdrState != null)
+        {
+            var hdr = Ui.Item(m.Items, "HDR", hdrState.Value, delegate { ToggleHdr(); });
+            if (cfg.HdrVk != 0) hdr.ShortcutKeyDisplayString = KeyCombo.Name(cfg.HdrMods, cfg.HdrVk);
+        }
+        // 手动切换: 开着日出日落自动切换时, 保持到下一次日出或日落
+        bool light = SystemTheme.IsLight();
+        Ui.Item(m.Items, light ? "切换到深色模式" : "切换到浅色模式", false, delegate
+        {
+            try { SystemTheme.Set(!light); }
+            catch (Exception ex) { Log.Write("切换主题失败: " + ex.Message); }
+        });
+        m.Items.Add(Ui.Separator());
 
         var blank = Ui.Item(m.Items, "立即黑屏", false, delegate { ShowOverlay(); });
         blank.ShortcutKeyDisplayString = KeyCombo.Name(cfg.BlankMods, cfg.BlankVk);
@@ -1257,6 +1373,7 @@ class App : ApplicationContext
         StopLocate(null);
         CursorHider.Restore();
         NightTint.Restore();
+        HideWarning();
         if (overlayVisible) HideOverlay();
         if (settings != null) settings.Close();
         tray.Remove();

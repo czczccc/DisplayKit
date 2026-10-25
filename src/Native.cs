@@ -285,6 +285,46 @@ static class Native
         public int scaleRel;
     }
 
+    // HDR: Windows 11 24H2 起用 GET_ADVANCED_COLOR_INFO_2 / SET_HDR_STATE, 更早的系统用 GET_ADVANCED_COLOR_INFO / SET_ADVANCED_COLOR_STATE
+    public const int DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO = 9;
+    public const int DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE = 10;
+    public const int DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2 = 15;
+    public const int DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE = 16;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO
+    {
+        public DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+        public uint value; // bit0 支持, bit1 已开启
+        public int colorEncoding;
+        public uint bitsPerColorChannel;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2
+    {
+        public DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+        public uint value; // bit4 支持 HDR, bit5 用户已开启 HDR
+        public int colorEncoding;
+        public uint bitsPerColorChannel;
+        public int activeColorMode;
+    }
+
+    // SET_ADVANCED_COLOR_STATE 和 SET_HDR_STATE 的结构相同: bit0 = 开启
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE
+    {
+        public DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+        public uint value;
+    }
+
+    [DllImport("user32.dll")]
+    public static extern int DisplayConfigGetDeviceInfo(ref DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO packet);
+    [DllImport("user32.dll")]
+    public static extern int DisplayConfigGetDeviceInfo(ref DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 packet);
+    [DllImport("user32.dll")]
+    public static extern int DisplayConfigSetDeviceInfo(ref DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE packet);
+
     [DllImport("user32.dll")]
     public static extern int GetDisplayConfigBufferSizes(uint flags, out uint numPaths, out uint numModes);
     [DllImport("user32.dll")]

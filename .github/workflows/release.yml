@@ -28,18 +28,30 @@ jobs:
 
       - name: Build
         shell: cmd
-        run: '"%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /codepage:65001 /optimize /warn:4 /warnaserror /target:winexe /win32manifest:src\app.manifest /win32icon:src\app.ico /out:DisplayKit.exe /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Device.dll src\*.cs'
+        run: call build.bat DisplayKit.exe
+
+      # 自动更新会先下载这个文件, 核对 exe 的 SHA256 后才替换
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash DisplayKit.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$h  DisplayKit.exe" | Out-File -Encoding ascii -NoNewline DisplayKit.exe.sha256
+          Get-Content DisplayKit.exe.sha256
 
       - uses: actions/upload-artifact@v4
         with:
           name: DisplayKit
-          path: DisplayKit.exe
+          path: |
+            DisplayKit.exe
+            DisplayKit.exe.sha256
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: DisplayKit.exe
+          files: |
+            DisplayKit.exe
+            DisplayKit.exe.sha256
           generate_release_notes: true
           body: |
             下载 `DisplayKit.exe` 直接运行即可，单文件、无需安装（Windows 10/11 自带所需的 .NET Framework 4.8）。

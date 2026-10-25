@@ -212,12 +212,16 @@ class DisplayProfile
     public int HotkeyVk, HotkeyMods;
     public List<string> AutoApps = new List<string>(); // 这些程序运行时自动切到此模式 (进程名, 小写, 不含 .exe)
     public bool Verified; // 用户已确认过这个模式能正常显示, 之后切换不再询问
+    public const int HdrKeep = 0, HdrOn = 1, HdrOff = 2;
+    public int Hdr = HdrKeep;
 
     public string Describe()
     {
         string s = Width + "×" + Height;
         s += RefreshRate > 0 ? " · " + RefreshRate + "Hz" : " · 刷新率不变";
         if (Scale > 0) s += " · " + Scale + "%";
+        if (Hdr == HdrOn) s += " · HDR 开";
+        else if (Hdr == HdrOff) s += " · HDR 关";
         return s;
     }
 
@@ -256,6 +260,10 @@ class Settings
     public int PowerOffVk, PowerOffMods;    // 立即关闭显示器
     public int IconsVk, IconsMods;          // 显示/隐藏桌面图标
     public int CursorHideSec;               // 鼠标多久不动隐藏指针, 0 = 不隐藏
+    public int WarnSec = 5;                 // 黑屏前几秒开始变暗提示, 0 = 不提示
+    public bool ScheduleOn;                 // 时段规则: 某个时段内用另一个黑屏等待时间
+    public int ScheduleStart = 23, ScheduleEnd = 7; // 整点, 可以跨午夜
+    public int ScheduleTimeoutSec = 60;     // 时段内的黑屏等待时间, 0 = 不自动黑屏
     public int LockScreenOffSec = 10;   // 锁屏后多少秒关闭显示器, 0 = 不关
     public bool CheckUpdates = true;
     public bool AutoInstallUpdates = true; // 发现新版本后自动下载并重启到新版本
@@ -263,6 +271,7 @@ class Settings
     // ----- 显示模式 -----
     public string DisplayDevice = "";   // 留空 = 主显示器
     public int ToggleVk, ToggleMods;    // 在模式间循环切换
+    public int HdrVk, HdrMods;          // 开关 HDR
     public List<DisplayProfile> Profiles = new List<DisplayProfile>();
 
     // ----- 外观 -----
@@ -388,6 +397,11 @@ class Settings
             case "PowerOffKey": if (KeyCombo.Parse(v, out m, out n)) { PowerOffVk = n; PowerOffMods = m; } break;
             case "IconsKey": if (KeyCombo.Parse(v, out m, out n)) { IconsVk = n; IconsMods = m; } break;
             case "CursorHideSec": if (int.TryParse(v, out n) && n >= 0) CursorHideSec = n; break;
+            case "WarnSec": if (int.TryParse(v, out n) && n >= 0) WarnSec = n; break;
+            case "ScheduleOn": ScheduleOn = v == "1"; break;
+            case "ScheduleStart": if (int.TryParse(v, out n) && n >= 0 && n < 24) ScheduleStart = n; break;
+            case "ScheduleEnd": if (int.TryParse(v, out n) && n >= 0 && n < 24) ScheduleEnd = n; break;
+            case "ScheduleTimeoutSec": if (int.TryParse(v, out n) && (n == 0 || n >= 10)) ScheduleTimeoutSec = n; break;
             // v0.1 的写法
             case "WakeVk": if (int.TryParse(v, out n) && n > 0 && n < 256) WakeVk = n; break;
             case "WakeMods": if (int.TryParse(v, out n) && n >= 0 && n < 16) WakeMods = n; break;
@@ -410,6 +424,7 @@ class Settings
         int m, n;
         if (k == "Device") DisplayDevice = v;
         else if (k == "ToggleHotkey" && KeyCombo.Parse(v, out m, out n)) { ToggleVk = n; ToggleMods = m; }
+        else if (k == "HdrHotkey" && KeyCombo.Parse(v, out m, out n)) { HdrVk = n; HdrMods = m; }
     }
 
     void ReadAppearance(string k, string v)
@@ -434,6 +449,7 @@ class Settings
         else if (string.Equals(k, "Hotkey", StringComparison.OrdinalIgnoreCase) && KeyCombo.Parse(v, out m, out n)) { p.HotkeyVk = n; p.HotkeyMods = m; }
         else if (k == "AutoApps") p.AutoApps = DisplayProfile.SplitList(v);
         else if (k == "Verified") p.Verified = v == "1";
+        else if (k == "Hdr" && int.TryParse(v, out n) && n >= 0 && n <= 2) p.Hdr = n;
     }
 
     public void Save()
@@ -456,6 +472,11 @@ class Settings
             sb.AppendLine("PowerOffKey=" + KeyCombo.Format(PowerOffMods, PowerOffVk));
             sb.AppendLine("IconsKey=" + KeyCombo.Format(IconsMods, IconsVk));
             sb.AppendLine("CursorHideSec=" + CursorHideSec);
+            sb.AppendLine("WarnSec=" + WarnSec);
+            sb.AppendLine("ScheduleOn=" + (ScheduleOn ? "1" : "0"));
+            sb.AppendLine("ScheduleStart=" + ScheduleStart);
+            sb.AppendLine("ScheduleEnd=" + ScheduleEnd);
+            sb.AppendLine("ScheduleTimeoutSec=" + ScheduleTimeoutSec);
             sb.AppendLine("Whitelist=" + string.Join("|", Whitelist.ToArray()));
             sb.AppendLine("BlankDevices=" + string.Join("|", BlankDevices.ToArray()));
             sb.AppendLine("LockScreenOffSec=" + LockScreenOffSec);
@@ -473,6 +494,7 @@ class Settings
             sb.AppendLine("[Display]");
             sb.AppendLine("Device=" + DisplayDevice);
             sb.AppendLine("ToggleHotkey=" + KeyCombo.Format(ToggleMods, ToggleVk));
+            sb.AppendLine("HdrHotkey=" + KeyCombo.Format(HdrMods, HdrVk));
             foreach (var p in Profiles)
             {
                 sb.AppendLine();
@@ -484,6 +506,7 @@ class Settings
                 sb.AppendLine("Hotkey=" + KeyCombo.Format(p.HotkeyMods, p.HotkeyVk));
                 sb.AppendLine("AutoApps=" + string.Join("|", p.AutoApps.ToArray()));
                 sb.AppendLine("Verified=" + (p.Verified ? "1" : "0"));
+                sb.AppendLine("Hdr=" + p.Hdr);
             }
             // 先写临时文件再替换, 写到一半断电/崩溃也不会把原来的配置弄坏
             string tmp = FilePath + ".tmp";

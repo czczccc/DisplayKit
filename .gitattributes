@@ -1,0 +1,2 @@
+# cmd 解析 LF 换行的批处理 (尤其带中文、chcp 65001 时) 会读错位置, .bat 一律 CRLF
+*.bat text eol=crlf

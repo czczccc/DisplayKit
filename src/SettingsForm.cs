@@ -10,8 +10,9 @@ using System.Windows.Forms;
 class SettingsForm : Form, IKeyCapture
 {
     enum Page { Guard, Display, General }
-    const int TargetWake = 1, TargetBlank = 2, TargetToggle = 3, TargetPowerOff = 4, TargetIcons = 5;
+    const int TargetWake = 1, TargetBlank = 2, TargetToggle = 3, TargetPowerOff = 4, TargetIcons = 5, TargetHdr = 6;
     static readonly int[] CursorHides = { 0, 3, 5, 10, 30 };
+    static readonly int[] Warns = { 0, 3, 5, 10 };
     static readonly int[] NightKelvins = { 0, 5500, 5000, 4500, 4000 };
     static readonly int[] Timeouts = { 30, 60, 120, 180, 300, 600, 900, 1800 };
     static readonly int[] PowerOffs = { 0, 1, 5, 15, 30, 60 };
@@ -280,7 +281,7 @@ class SettingsForm : Form, IKeyCapture
     }
 
     // 可以清除 (不设快捷键) 的项
-    static bool Clearable(int target) { return target == TargetToggle || target == TargetPowerOff || target == TargetIcons; }
+    static bool Clearable(int target) { return target == TargetToggle || target == TargetPowerOff || target == TargetIcons || target == TargetHdr; }
 
     static string HotkeyKey(int target)
     {
@@ -289,6 +290,7 @@ class SettingsForm : Form, IKeyCapture
             case TargetBlank: return "blank";
             case TargetPowerOff: return "poweroff";
             case TargetIcons: return "icons";
+            case TargetHdr: return "hdr";
         }
         return "toggle";
     }
@@ -302,6 +304,7 @@ class SettingsForm : Form, IKeyCapture
             case TargetBlank: cfg.BlankVk = vk; cfg.BlankMods = mods; break;
             case TargetPowerOff: cfg.PowerOffVk = vk; cfg.PowerOffMods = mods; break;
             case TargetIcons: cfg.IconsVk = vk; cfg.IconsMods = mods; break;
+            case TargetHdr: cfg.HdrVk = vk; cfg.HdrMods = mods; break;
             default: cfg.ToggleVk = vk; cfg.ToggleMods = mods; break;
         }
     }
@@ -404,6 +407,12 @@ class SettingsForm : Form, IKeyCapture
             foreach (int px in Thresholds) { int v = px; Ui.Item(m.Items, ThresholdName(v), cfg.MoveThreshold == v, delegate { cfg.MoveThreshold = v; Changed(); }); }
             return m;
         }, S(150)));
+        c1.AddRow("黑屏前提示", "屏幕逐渐变暗并倒计时，动一下就取消", Drop(WarnName(cfg.WarnSec), delegate
+        {
+            var m = Ui.Menu();
+            foreach (int sec in Warns) { int v = sec; Ui.Item(m.Items, WarnName(v), cfg.WarnSec == v, delegate { cfg.WarnSec = v; Changed(); }); }
+            return m;
+        }, S(150)));
         if (Screen.AllScreens.Length > 1)
             c1.AddRow("黑屏的显示器", "只黑 OLED 屏，其他屏幕照常显示；关闭显示器会关掉全部屏幕", Drop(BlankDevicesName(), BlankDevicesMenu, S(150)));
         c1.AddRow("锁屏后关闭显示器", "锁屏界面也是静态画面，本程序无法覆盖", Drop(LockOffName(cfg.LockScreenOffSec), delegate
@@ -457,7 +466,38 @@ class SettingsForm : Form, IKeyCapture
             c3.AddRow(n + ".exe", null, Button("移除", false, delegate { cfg.Whitelist.Remove(n); Changed(); }));
         }
         y = Section("这些情况不黑屏", c3, y);
+
+        var c5 = new Card(W);
+        c5.AddRow("按时间段使用不同的规则", "比如深夜缩短黑屏等待时间，或某些时段不自动黑屏", Switch(cfg.ScheduleOn, v => { cfg.ScheduleOn = v; Later(); }));
+        if (cfg.ScheduleOn)
+        {
+            string range = HourName(cfg.ScheduleStart) + " 到" + (cfg.ScheduleEnd <= cfg.ScheduleStart ? "次日 " : " ") + HourName(cfg.ScheduleEnd);
+            c5.AddRow("时段", cfg.ScheduleStart == cfg.ScheduleEnd ? "开始和结束不能相同" : range,
+                Ui.Group(HourDrop(cfg.ScheduleStart, v => cfg.ScheduleStart = v), HourDrop(cfg.ScheduleEnd, v => cfg.ScheduleEnd = v)));
+            c5.AddRow("这个时段内", app.InSchedule(DateTime.Now) ? "现在正在这个时段内" : "其他时间按上面的设置", Drop(ScheduleName(cfg.ScheduleTimeoutSec), delegate
+            {
+                var m = Ui.Menu();
+                Ui.Item(m.Items, ScheduleName(0), cfg.ScheduleTimeoutSec == 0, delegate { cfg.ScheduleTimeoutSec = 0; Changed(); });
+                foreach (int sec in Timeouts) { int v = sec; Ui.Item(m.Items, ScheduleName(v), cfg.ScheduleTimeoutSec == v, delegate { cfg.ScheduleTimeoutSec = v; Changed(); }); }
+                return m;
+            }, S(150)));
+        }
+        y = Section("时段规则", c5, y);
         return y;
+    }
+
+    static string WarnName(int sec) { return sec == 0 ? "不提示" : "提前 " + sec + " 秒"; }
+    static string HourName(int h) { return h.ToString("00") + ":00"; }
+    static string ScheduleName(int sec) { return sec == 0 ? "不自动黑屏" : TimeName(sec) + "后黑屏"; }
+
+    RoundButton HourDrop(int value, Action<int> set)
+    {
+        return Drop(HourName(value), delegate
+        {
+            var m = Ui.Menu();
+            for (int h = 0; h < 24; h++) { int v = h; Ui.Item(m.Items, HourName(v), value == v, delegate { set(v); Changed(); }); }
+            return m;
+        }, S(90));
     }
 
     static string CursorHideName(int sec) { return sec == 0 ? "不隐藏" : sec + " 秒后"; }
@@ -582,7 +622,13 @@ class SettingsForm : Form, IKeyCapture
             return m;
         }, S(180)));
         c1.AddRow("循环切换快捷键", "按顺序在下面的模式之间切换", KeyButton(TargetToggle, cfg.ToggleMods, cfg.ToggleVk));
-        AddKeyHint(c1, TargetToggle);
+        if (app.HdrState != null)
+        {
+            c1.AddRow("HDR", app.HdrState.Value ? "已开启；每个模式也可以设置切换时开或关 HDR" : "已关闭；每个模式也可以设置切换时开或关 HDR",
+                Button(app.HdrState.Value ? "关闭" : "开启", false, delegate { app.ToggleHdr(); Later(); }));
+            c1.AddRow("开关 HDR 快捷键", "托盘菜单里也可以开关", KeyButton(TargetHdr, cfg.HdrMods, cfg.HdrVk));
+        }
+        AddKeyHint(c1, TargetToggle, TargetHdr);
         y = Section("显示器", c1, y);
 
         var c2 = new Card(W);
@@ -741,7 +787,7 @@ class SettingsForm : Form, IKeyCapture
         var c2 = new Card(W);
         c2.AddRow("自动检查更新", "每天检查一次 GitHub 上的新版本", Switch(cfg.CheckUpdates, v => { cfg.CheckUpdates = v; Later(); }));
         if (cfg.CheckUpdates)
-            c2.AddRow("自动安装更新", "发现新版本后在你不操作电脑时自动下载并重启，设置保持不变", Switch(cfg.AutoInstallUpdates, v => cfg.AutoInstallUpdates = v));
+            c2.AddRow("自动安装更新", "新版本发布满一天后，在你不操作电脑时自动安装并重启", Switch(cfg.AutoInstallUpdates, v => cfg.AutoInstallUpdates = v));
         if (app.LatestVersion != null)
         {
             var install = Button(app.Updating ? "更新中…" : "立即更新", true, delegate { app.InstallUpdate(); Later(); });
@@ -778,7 +824,10 @@ class SettingsForm : Form, IKeyCapture
         var c = new Card(W);
         c.AddRow("跟随日出日落切换深浅色", "白天浅色、日落后深色；手动改过后到下次日出或日落再自动切换",
             Switch(cfg.AutoTheme, v => { cfg.AutoTheme = v; app.ApplySunTheme(); Later(); }));
-        c.AddRow("夜间暖色", app.NightTintFailed ? "显示器不接受调色（开着 HDR 时无效）" : "日落到日出之间把屏幕调暖；别和 Windows 夜间模式同时开",
+        string tintSub = app.HdrState == true ? "现在开着 HDR，暖色不起作用"
+            : app.NightTintFailed ? "显示器不接受调色曲线"
+            : "日落到日出之间把屏幕调暖；别和 Windows 夜间模式同时开";
+        c.AddRow("夜间暖色", tintSub,
             Drop(KelvinName(cfg.NightKelvin), delegate
             {
                 var m = Ui.Menu();
@@ -1038,6 +1087,17 @@ class ProfileEditor : Form, IKeyCapture
             return m;
         }, S(200)));
 
+        card.AddRow("HDR", "切换到这个模式时开启或关闭 HDR", Drop(HdrName(Result.Hdr), delegate
+        {
+            var m = Ui.Menu();
+            foreach (int h in new[] { DisplayProfile.HdrKeep, DisplayProfile.HdrOn, DisplayProfile.HdrOff })
+            {
+                int v = h;
+                Ui.Item(m.Items, HdrName(v), Result.Hdr == v, delegate { Result.Hdr = v; Later(); });
+            }
+            return m;
+        }, S(200)));
+
         var key = new RoundButton(capturing ? "请按下按键…" : Result.HotkeyVk == 0 ? "未设置" : KeyCombo.Name(Result.HotkeyMods, Result.HotkeyVk)) { Highlight = capturing };
         key.FitWidth(S(200));
         key.Click += delegate
@@ -1084,6 +1144,8 @@ class ProfileEditor : Form, IKeyCapture
 
         ClientSize = new Size(W + x * 2, y);
     }
+
+    static string HdrName(int h) { return h == DisplayProfile.HdrOn ? "开启" : h == DisplayProfile.HdrOff ? "关闭" : "不改"; }
 
     void TrySave()
     {

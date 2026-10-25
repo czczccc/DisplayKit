@@ -124,17 +124,69 @@ static class DisplayController
     public static void Apply(string device, DisplayProfile p)
     {
         SetResolution(device, p.Width, p.Height, p.RefreshRate);
-        if (p.Scale <= 0) return;
-
-        // 分辨率刚切换完, DisplayConfig 偶尔还没刷新, 读回不对就稍等重试
-        for (int attempt = 0; ; attempt++)
+        if (p.Scale > 0)
         {
-            SetScale(device, p.Scale);
-            if (GetScale(device).Current == p.Scale) break;
-            if (attempt >= 3)
-                throw new InvalidOperationException("缩放设置为 " + p.Scale + "% 后读回的值不一致，请到 Windows 显示设置里确认。");
-            Thread.Sleep(500);
+            // 分辨率刚切换完, DisplayConfig 偶尔还没刷新, 读回不对就稍等重试
+            for (int attempt = 0; ; attempt++)
+            {
+                SetScale(device, p.Scale);
+                if (GetScale(device).Current == p.Scale) break;
+                if (attempt >= 3)
+                    throw new InvalidOperationException("缩放设置为 " + p.Scale + "% 后读回的值不一致，请到 Windows 显示设置里确认。");
+                Thread.Sleep(500);
+            }
         }
+        if (p.Hdr != DisplayProfile.HdrKeep) SetHdr(device, p.Hdr == DisplayProfile.HdrOn);
+    }
+
+    // ---------- HDR ----------
+
+    static Native.DISPLAYCONFIG_DEVICE_INFO_HEADER TargetHeader(string device, int type, Type packet)
+    {
+        foreach (var p in QueryPaths())
+            if (string.Equals(SourceName(p), device, StringComparison.OrdinalIgnoreCase))
+                return new Native.DISPLAYCONFIG_DEVICE_INFO_HEADER
+                {
+                    type = type,
+                    size = (uint)Marshal.SizeOf(packet),
+                    adapterId = p.targetInfo.adapterId,
+                    id = p.targetInfo.id,
+                };
+        throw new InvalidOperationException("在当前显示配置里找不到 " + device + "。");
+    }
+
+    // HDR 是否开启, null = 这台显示器不支持 HDR
+    public static bool? GetHdr(string device)
+    {
+        var info2 = new Native.DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2();
+        info2.header = TargetHeader(device, Native.DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2, typeof(Native.DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2));
+        if (Native.DisplayConfigGetDeviceInfo(ref info2) == Native.ERROR_SUCCESS)
+            return (info2.value & 0x10) == 0 ? (bool?)null : (info2.value & 0x20) != 0;
+
+        // 24H2 之前的系统
+        var info = new Native.DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO();
+        info.header = TargetHeader(device, Native.DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO, typeof(Native.DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO));
+        int rc = Native.DisplayConfigGetDeviceInfo(ref info);
+        if (rc != Native.ERROR_SUCCESS)
+            throw new InvalidOperationException("读取 HDR 状态失败（错误码 " + rc + "）。");
+        return (info.value & 1) == 0 ? (bool?)null : (info.value & 2) != 0;
+    }
+
+    public static void SetHdr(string device, bool on)
+    {
+        bool? current = GetHdr(device);
+        if (current == null) throw new InvalidOperationException("这台显示器不支持 HDR（或显卡驱动没有开放）。");
+        if (current == on) return;
+        var set = new Native.DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE { value = on ? 1u : 0u };
+        set.header = TargetHeader(device, Native.DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE, typeof(Native.DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE));
+        int rc = Native.DisplayConfigSetDeviceInfo(ref set);
+        if (rc != Native.ERROR_SUCCESS)
+        {
+            set.header.type = Native.DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE;
+            rc = Native.DisplayConfigSetDeviceInfo(ref set);
+        }
+        if (rc != Native.ERROR_SUCCESS)
+            throw new InvalidOperationException((on ? "开启" : "关闭") + " HDR 失败（错误码 " + rc + "）。");
     }
 
     public static void SetResolution(string device, int width, int height, int refreshRate)
