@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Device.Location;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -80,6 +81,14 @@ class App : ApplicationContext
     string autoInstallFailed; // 自动安装失败过的版本, 不再自动重试
     Icon formIcon;
 
+    // 跟随日出日落切换深浅色
+    int lastSunCheck = unchecked(Environment.TickCount - 60000);
+    bool? sunLight; // 上次按日出日落定下的主题, null = 还没定 (下次检查时立即应用)
+    GeoCoordinateWatcher geo;
+    int geoStartedAt;
+    DateTime nextLocate = DateTime.Now.AddSeconds(5);
+    string locationStatus;
+
     SettingsForm settings;
     volatile IKeyCapture capture;
     int pendingModOnly; // 录入快捷键时: 只按了修饰键还没按别的键
@@ -96,6 +105,8 @@ class App : ApplicationContext
     public string UpdateStatus { get { return updateStatus; } }
     public bool UpdateChecking { get { return updateChecking; } }
     public bool Updating { get { return updating; } }
+    public string LocationStatus { get { return locationStatus; } }
+    public bool Locating { get { return geo != null; } }
     public bool Paused { get { return DateTime.Now < pausedUntil; } }
     public DateTime PausedUntil { get { return pausedUntil; } }
     public IKeyCapture Capture { get { return capture; } set { capture = value; pendingModOnly = 0; } }
@@ -536,6 +547,9 @@ class App : ApplicationContext
         }
 
         if (Since(lastAutoCheck) >= 2000) CheckAutoSwitch();
+        if (Since(lastSunCheck) >= 30000) CheckSunTheme();
+        if (cfg.AutoTheme && cfg.UseSystemLocation && geo == null && DateTime.Now >= nextLocate) Locate();
+        if (geo != null && Since(geoStartedAt) >= 60000) StopLocate("定位超时，" + (cfg.HasLocation ? "沿用上次的位置" : "请稍后重试或手动输入坐标"));
         if (cfg.CheckUpdates && DateTime.Now >= nextUpdateCheck)
         {
             nextUpdateCheck = DateTime.Now.AddHours(24);
@@ -799,7 +813,7 @@ class App : ApplicationContext
         {
             updateStatus = "已是最新版本";
         }
-        if (settings != null) settings.OnUpdateChecked();
+        if (settings != null) settings.RefreshGeneral();
     }
 
     // 自动安装要重启程序, 黑屏/锁屏/暂停/自动切换等状态会丢, 这些时候先不装
@@ -817,7 +831,7 @@ class App : ApplicationContext
         if (latestUrl == null) { OpenUrl(RepoUrl + "/releases/latest"); return; }
         updating = true;
         updateStatus = "正在下载 v" + latestVersion + "…";
-        if (settings != null) settings.OnUpdateChecked();
+        if (settings != null) settings.RefreshGeneral();
         string tag = latestVersion, url = latestUrl, newPath = ExePath + ".new";
         bool auto = !(settings != null && settings.Visible);
         ThreadPool.QueueUserWorkItem(delegate
@@ -868,7 +882,7 @@ class App : ApplicationContext
             updateStatus = "更新失败：" + error;
             Log.Write("更新到 v" + tag + " 失败: " + error);
             tray.ShowBalloon("DisplayKit 更新失败", error, TrayIcon.InfoError);
-            if (settings != null) settings.OnUpdateChecked();
+            if (settings != null) settings.RefreshGeneral();
             return;
         }
         Log.Write("已更新到 v" + tag + ", 重启");
@@ -925,6 +939,80 @@ class App : ApplicationContext
         MakeIcons();
         tray.Icon = Paused ? iconPaused : iconActive;
         if (settings != null) settings.ApplyTheme();
+    }
+
+    // ---------- 日出日落主题 ----------
+
+    // 只在日出 / 日落那一刻 (以及刚打开此功能、程序启动、改了位置时) 切换主题,
+    // 中途手动改过主题就保持到下一次日出或日落, 和 iPhone 的"自动"外观一样
+    void CheckSunTheme()
+    {
+        lastSunCheck = Environment.TickCount;
+        if (!cfg.AutoTheme || !cfg.HasLocation) { sunLight = null; return; }
+        bool light = Sun.IsDay(DateTime.Now, cfg.Latitude, cfg.Longitude);
+        if (sunLight == light) return;
+        sunLight = light;
+        if (SystemTheme.IsLight() == light) return;
+        try
+        {
+            SystemTheme.Set(light);
+            Log.Write("日" + (light ? "出" : "落") + ", 切换到" + (light ? "浅色" : "深色") + "主题");
+        }
+        catch (Exception ex) { Log.Write("切换主题失败: " + ex.Message); }
+    }
+
+    // 设置改动后立即按当前时间应用一次
+    public void ApplySunTheme()
+    {
+        sunLight = null;
+        CheckSunTheme();
+    }
+
+    // 用 Windows 定位服务取一次位置 (城市级精度就够), 之后每 6 小时更新
+    public void Locate()
+    {
+        nextLocate = DateTime.Now.AddHours(6);
+        if (geo != null) return;
+        try
+        {
+            geo = new GeoCoordinateWatcher(GeoPositionAccuracy.Default);
+            geo.PositionChanged += (s, e) => invoker.BeginInvoke((Action)delegate { OnLocated(e.Position.Location); });
+            geo.StatusChanged += (s, e) =>
+            {
+                if (e.Status == GeoPositionStatus.Disabled)
+                    invoker.BeginInvoke((Action)delegate { StopLocate("Windows 定位已关闭或不允许桌面应用访问位置"); });
+            };
+            geoStartedAt = Environment.TickCount;
+            locationStatus = "正在定位…";
+            geo.Start(true);
+            if (geo != null && geo.Permission == GeoPositionPermission.Denied) StopLocate("Windows 不允许本程序访问位置");
+        }
+        catch (Exception ex) { StopLocate("定位失败：" + ex.Message); }
+        if (settings != null) settings.RefreshGeneral();
+    }
+
+    void OnLocated(GeoCoordinate c)
+    {
+        if (geo == null || c.IsUnknown) return;
+        // 只存两位小数 (约 1 公里), 日出日落用不着更精确的位置
+        cfg.Latitude = Math.Round(c.Latitude, 2);
+        cfg.Longitude = Math.Round(c.Longitude, 2);
+        cfg.Save();
+        StopLocate(null);
+        ApplySunTheme();
+    }
+
+    void StopLocate(string error)
+    {
+        if (geo != null)
+        {
+            geo.Stop();
+            geo.Dispose();
+            geo = null;
+        }
+        locationStatus = error;
+        if (error != null) Log.Write("定位: " + error);
+        if (settings != null) settings.RefreshGeneral();
     }
 
     // ---------- 设置 / 菜单 ----------
@@ -1084,6 +1172,7 @@ class App : ApplicationContext
         SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
         SystemEvents.SessionSwitch -= OnSessionSwitch;
         StopHooks();
+        StopLocate(null);
         if (overlayVisible) HideOverlay();
         if (settings != null) settings.Close();
         tray.Remove();

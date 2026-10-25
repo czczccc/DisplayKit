@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Windows.Forms;
@@ -261,6 +262,25 @@ class Settings
     public int ToggleVk, ToggleMods;    // 在模式间循环切换
     public List<DisplayProfile> Profiles = new List<DisplayProfile>();
 
+    // ----- 外观 -----
+    public bool AutoTheme;                  // 跟随日出日落切换深色/浅色
+    public bool UseSystemLocation = true;   // 用 Windows 定位, 否则用手动填的坐标
+    public double Latitude = double.NaN, Longitude = double.NaN; // 最近一次的位置, 定位失败时沿用
+
+    public bool HasLocation { get { return !double.IsNaN(Latitude) && !double.IsNaN(Longitude); } }
+
+    public static string FormatCoord(double v) { return v.ToString("0.####", CultureInfo.InvariantCulture); }
+
+    // "纬度, 经度", 允许中文逗号或空格分隔
+    public static bool ParseLocation(string text, out double lat, out double lon)
+    {
+        lat = lon = double.NaN;
+        var parts = text.Split(new[] { ',', '，', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length == 2
+            && double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out lat) && Math.Abs(lat) <= 90
+            && double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out lon) && Math.Abs(lon) <= 180;
+    }
+
     public static string Dir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DisplayKit"); } }
     public static string FilePath { get { return Path.Combine(Dir, "config.ini"); } }
     static string LegacyDir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OledGuard"); } }
@@ -334,6 +354,7 @@ class Settings
                 string k = line.Substring(0, i).Trim(), v = line.Substring(i + 1).Trim();
                 if (mode != null) ReadMode(mode, k, v);
                 else if (section == "display") s.ReadDisplay(k, v);
+                else if (section == "appearance") s.ReadAppearance(k, v);
                 else s.ReadGuard(k, v); // 没有段落头的旧版配置也当作防烧屏设置
             }
             s.Profiles.RemoveAll(p => p.Width <= 0 || p.Height <= 0 || p.Name.Length == 0);
@@ -382,6 +403,14 @@ class Settings
         else if (k == "ToggleHotkey" && KeyCombo.Parse(v, out m, out n)) { ToggleVk = n; ToggleMods = m; }
     }
 
+    void ReadAppearance(string k, string v)
+    {
+        double lat, lon;
+        if (k == "AutoTheme") AutoTheme = v == "1";
+        else if (k == "UseSystemLocation") UseSystemLocation = v == "1";
+        else if (k == "Location" && ParseLocation(v, out lat, out lon)) { Latitude = lat; Longitude = lon; }
+    }
+
     static void ReadMode(DisplayProfile p, string k, string v)
     {
         int n, m;
@@ -416,6 +445,11 @@ class Settings
             sb.AppendLine("LockScreenOffSec=" + LockScreenOffSec);
             sb.AppendLine("CheckUpdates=" + (CheckUpdates ? "1" : "0"));
             sb.AppendLine("AutoInstallUpdates=" + (AutoInstallUpdates ? "1" : "0"));
+            sb.AppendLine();
+            sb.AppendLine("[Appearance]");
+            sb.AppendLine("AutoTheme=" + (AutoTheme ? "1" : "0"));
+            sb.AppendLine("UseSystemLocation=" + (UseSystemLocation ? "1" : "0"));
+            sb.AppendLine("Location=" + (HasLocation ? FormatCoord(Latitude) + "," + FormatCoord(Longitude) : ""));
             sb.AppendLine();
             sb.AppendLine("[Display]");
             sb.AppendLine("Device=" + DisplayDevice);

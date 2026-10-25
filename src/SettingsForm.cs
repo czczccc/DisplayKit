@@ -87,7 +87,7 @@ class SettingsForm : Form, IKeyCapture
         base.WndProc(ref m);
     }
 
-    public void OnUpdateChecked()
+    public void RefreshGeneral()
     {
         if (page == Page.General && captureTarget == 0) Rebuild();
     }
@@ -692,6 +692,7 @@ class SettingsForm : Form, IKeyCapture
                 return m;
             }, S(120)));
         y = Section("运行", c1, y);
+        y = BuildAppearance(y);
 
         var cfg = app.Cfg;
         var c2 = new Card(W);
@@ -724,6 +725,81 @@ class SettingsForm : Form, IKeyCapture
         c3.AddRow("退出程序", "关闭本窗口不会退出，程序会在托盘继续运行", Button("退出", false, delegate { app.ExitThread(); }));
         y = Section("关于", c3, y);
         return y;
+    }
+
+    string coordText, coordError; // 坐标输入框最近一次提交的内容 (重建窗口时输入框失去焦点也会提交, 用它去重) 和错误提示
+
+    int BuildAppearance(int y)
+    {
+        var cfg = app.Cfg;
+        var c = new Card(W);
+        c.AddRow("跟随日出日落切换深浅色", "白天浅色、日落后深色；手动改过后到下次日出或日落再自动切换",
+            Switch(cfg.AutoTheme, v => { cfg.AutoTheme = v; app.ApplySunTheme(); Later(); }));
+        if (cfg.AutoTheme)
+        {
+            var source = Drop(cfg.UseSystemLocation ? "Windows 定位" : "手动输入", delegate
+            {
+                var m = Ui.Menu();
+                Ui.Item(m.Items, "Windows 定位", cfg.UseSystemLocation, delegate { cfg.UseSystemLocation = true; app.Locate(); Changed(); });
+                Ui.Item(m.Items, "手动输入坐标", !cfg.UseSystemLocation, delegate { cfg.UseSystemLocation = false; coordText = null; coordError = null; Changed(); });
+                return m;
+            }, S(130));
+            if (cfg.UseSystemLocation)
+            {
+                string status = app.Locating ? "正在定位…" : app.LocationStatus
+                    ?? (cfg.HasLocation ? "已定位：" + Settings.FormatCoord(cfg.Latitude) + ", " + Settings.FormatCoord(cfg.Longitude) : "还没有定位");
+                var relocate = Button("重新定位", false, delegate { app.Locate(); Later(); });
+                relocate.Enabled = !app.Locating;
+                c.AddRow("位置", status, Ui.Group(source, relocate));
+                if (!app.Locating && app.LocationStatus != null)
+                    c.AddRow("Windows 定位设置", "需要打开「定位服务」和「允许桌面应用访问你的位置」", Button("打开", false, delegate { App.OpenUrl("ms-settings:privacy-location"); }));
+            }
+            else
+            {
+                c.AddRow("位置", "不使用定位服务，按下面的坐标计算", source);
+                string shown = coordError != null ? coordText : cfg.HasLocation ? Settings.FormatCoord(cfg.Latitude) + ", " + Settings.FormatCoord(cfg.Longitude) : "";
+                var field = new TextField(shown, S(200));
+                field.Box.LostFocus += delegate { CommitCoord(field.Box.Text); };
+                field.Box.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; CommitCoord(field.Box.Text); } };
+                c.AddRow("坐标", "纬度, 经度，比如上海是 31.23, 121.47", field);
+                if (coordError != null) c.AddNote(coordError, Theme.Warn);
+            }
+            c.AddRow(SunSummary(), cfg.HasLocation ? "白天和晚上的主题会在日出、日落时自动切换" : "有了位置后才会自动切换",
+                Button("立即应用", false, delegate { app.ApplySunTheme(); Later(); }));
+        }
+        return Section("外观", c, y);
+    }
+
+    void CommitCoord(string text)
+    {
+        text = text.Trim();
+        if (text == coordText) return;
+        coordText = text;
+        var cfg = app.Cfg;
+        double lat, lon;
+        if (text.Length == 0) coordError = null;
+        else if (!Settings.ParseLocation(text, out lat, out lon)) coordError = "坐标格式不对：纬度在 -90 到 90 之间，经度在 -180 到 180 之间，用逗号分开。";
+        else
+        {
+            coordError = null;
+            if (lat == cfg.Latitude && lon == cfg.Longitude) return;
+            cfg.Latitude = lat;
+            cfg.Longitude = lon;
+            app.Save();
+            app.ApplySunTheme();
+        }
+        Later();
+    }
+
+    string SunSummary()
+    {
+        var cfg = app.Cfg;
+        if (!cfg.HasLocation) return "还没有位置信息";
+        DateTime rise, set;
+        bool polarDay;
+        if (!Sun.Times(DateTime.Now, cfg.Latitude, cfg.Longitude, out rise, out set, out polarDay))
+            return polarDay ? "今天极昼，全天浅色" : "今天极夜，全天深色";
+        return "今天日出 " + rise.ToString("HH:mm") + " · 日落 " + set.ToString("HH:mm");
     }
 }
 

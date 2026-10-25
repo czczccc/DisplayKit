@@ -47,6 +47,11 @@ static class Native
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")]
     public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, int msg, IntPtr wParam, string lParam, uint flags, uint timeout, out IntPtr result);
+    public static readonly IntPtr HWND_BROADCAST = new IntPtr(0xFFFF);
+    public const int WM_SETTINGCHANGE = 0x1A;
+    public const uint SMTO_ABORTIFHUNG = 2;
     [DllImport("user32.dll")]
     public static extern short GetAsyncKeyState(int vk);
     [DllImport("user32.dll")]

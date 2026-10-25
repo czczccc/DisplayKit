@@ -59,6 +59,7 @@ Windows 下的 OLED 显示器托盘工具，两个功能合二为一：
 
 ### 其他
 
+- **跟随日出日落切换深浅色**（"通用 → 外观"，默认关闭）：像 iPhone 的"自动"外观，白天浅色、日落后深色，应用和任务栏一起切。中途手动改过主题会保持到下一次日出或日落。位置用 Windows 定位服务（需在系统设置里允许桌面应用访问位置），也可以手动填经纬度；日出日落在本地计算，不联网
 - 界面跟随系统深色/浅色模式，切换缩放或拖到其他屏幕时自动按新缩放重新排版
 - **自动更新**：每天检查 GitHub 上的新版本，发现后等你几十秒不操作键鼠时自动下载、替换 exe 并重启，设置和开机自启保持不变。黑屏、锁屏、暂停、游戏自动切换模式期间不会更新。也可以在"通用"里关掉自动安装，改成托盘提醒后手动点"立即更新"
 - 下载的文件版本号必须和发布标签一致才会替换；exe 放在没有写权限的目录（如 Program Files）时无法自动更新，需要手动下载
@@ -93,6 +94,7 @@ git push origin v1.1.0
 - 空闲检测与拦截：`WH_KEYBOARD_LL` / `WH_MOUSE_LL` 低级钩子；声音检测：Core Audio 峰值表；手柄：XInput
 - 分辨率/刷新率：`ChangeDisplaySettingsEx`（先 `CDS_TEST` 校验再写入）
 - 缩放：`DisplayConfigSetDeviceInfo`，与 Windows"设置 → 显示 → 缩放"相同的系统接口，立即生效、无需注销；切换时先改分辨率再改缩放
+- 深浅色：写 `HKCU\...\Themes\Personalize` 的 `AppsUseLightTheme` / `SystemUsesLightTheme` 后广播 `WM_SETTINGCHANGE("ImmersiveColorSet")`；位置：`System.Device.Location`；日出日落：NOAA 算法
 
 ## 限制
 

@@ -5,6 +5,6 @@ rem 输出到 %LOCALAPPDATA%\Programs\DisplayKit: 源码文件夹如果带有低
 set "OUT=%LOCALAPPDATA%\Programs\DisplayKit"
 if not exist "%OUT%" mkdir "%OUT%"
 taskkill /im DisplayKit.exe /f >nul 2>&1
-"%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /codepage:65001 /optimize /warn:4 /target:winexe /win32manifest:src\app.manifest /win32icon:src\app.ico /out:"%OUT%\DisplayKit.exe" /r:System.Windows.Forms.dll /r:System.Drawing.dll src\*.cs
+"%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /codepage:65001 /optimize /warn:4 /target:winexe /win32manifest:src\app.manifest /win32icon:src\app.ico /out:"%OUT%\DisplayKit.exe" /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Device.dll src\*.cs
 if errorlevel 1 (echo 编译失败 & pause & exit /b 1)
 echo 编译成功: %OUT%\DisplayKit.exe
