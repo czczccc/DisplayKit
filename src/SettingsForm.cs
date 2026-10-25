@@ -627,6 +627,10 @@ class SettingsForm : Form, IKeyCapture
             c1.AddRow("HDR", app.HdrState.Value ? "已开启；每个模式也可以设置切换时开或关 HDR" : "已关闭；每个模式也可以设置切换时开或关 HDR",
                 Button(app.HdrState.Value ? "关闭" : "开启", false, delegate { app.ToggleHdr(); Later(); }));
             c1.AddRow("开关 HDR 快捷键", "托盘菜单里也可以开关", KeyButton(TargetHdr, cfg.HdrMods, cfg.HdrVk));
+            bool calibInstalled = HdrCalibration.Installed;
+            c1.AddRow("HDR 校准", calibInstalled ? "用微软的 HDR 校准应用调暗部、亮部和饱和度，需要先开启 HDR" : "需要先从 Microsoft Store 安装微软的「Windows HDR Calibration」",
+                Button(calibInstalled ? "打开校准" : "去安装", false, delegate { HdrCalibration.Open(); }));
+            c1.AddRow("HDR 系统设置", "常开 HDR 时，在这里调「SDR 内容亮度」让桌面亮度合适", Button("打开", false, delegate { App.OpenUrl("ms-settings:display-hdr"); }));
         }
         AddKeyHint(c1, TargetToggle, TargetHdr);
         y = Section("显示器", c1, y);

@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 // 鼠标指针闲置隐藏: 把所有系统指针换成透明的, 恢复时让系统重新加载用户的指针方案
 static class CursorHider
@@ -71,6 +74,51 @@ static class DesktopIcons
         // 同步发送, 返回时状态已经变了 (资源管理器卡住时最多等 1 秒)
         Native.SendMessageTimeout(v, Native.WM_COMMAND, new IntPtr(ToggleCommand), IntPtr.Zero, Native.SMTO_ABORTIFHUNG, 1000, out result);
         return true;
+    }
+}
+
+// 微软的 Windows HDR Calibration 应用: 已安装就直接打开, 没装就打开 Store 的安装页
+static class HdrCalibration
+{
+    const string StoreUrl = "ms-windows-store://pdp/?ProductId=9N7F2SM5D1LR";
+    const string PackagesKey = @"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
+
+    // 已安装时返回 "包系列名!应用 ID", 用来通过 shell:AppsFolder 启动
+    static string FindApp()
+    {
+        try
+        {
+            using (var root = Registry.CurrentUser.OpenSubKey(PackagesKey))
+            {
+                if (root == null) return null;
+                foreach (string full in root.GetSubKeyNames())
+                {
+                    if (full.IndexOf("HDRCalibration", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    using (var k = root.OpenSubKey(full))
+                    {
+                        string folder = k == null ? null : k.GetValue("PackageRootFolder") as string;
+                        if (folder == null || !File.Exists(Path.Combine(folder, "AppxManifest.xml"))) continue;
+                        var m = Regex.Match(File.ReadAllText(Path.Combine(folder, "AppxManifest.xml")), "<Application\\s[^>]*\\bId=\"([^\"]+)\"");
+                        if (!m.Success) continue;
+                        // 完整包名 = 名称_版本_架构_资源_发布者ID, 包系列名 = 名称_发布者ID
+                        var parts = full.Split('_');
+                        return parts[0] + "_" + parts[parts.Length - 1] + "!" + m.Groups[1].Value;
+                    }
+                }
+            }
+        }
+        catch (Exception ex) { Log.Write("查找 HDR 校准应用失败: " + ex.Message); }
+        return null;
+    }
+
+    public static bool Installed { get { return FindApp() != null; } }
+
+    public static void Open()
+    {
+        string app = FindApp();
+        if (app == null) { App.OpenUrl(StoreUrl); return; }
+        try { System.Diagnostics.Process.Start("explorer.exe", @"shell:AppsFolder\" + app); }
+        catch (Exception ex) { Log.Write("打开 HDR 校准失败: " + ex.Message); App.OpenUrl(StoreUrl); }
     }
 }
 
