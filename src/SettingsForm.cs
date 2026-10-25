@@ -925,33 +925,53 @@ class SettingsForm : Form, IKeyCapture
         return y;
     }
 
+    bool wallpaperOpen;           // "顺便换壁纸"展开了
     string coordText, coordError; // 坐标输入框最近一次提交的内容 (重建窗口时输入框失去焦点也会提交, 用它去重) 和错误提示
 
+    // 外观按用途分三张卡片: 深色/浅色、晚上护眼、日出日落时间 (前两张里的自动功能都按它切换)
     int BuildAppearance(int y)
     {
         var cfg = app.Cfg;
-        var c = new Card(W);
-        c.AddRow("跟随日出日落切换深浅色", "白天浅色、晚上深色；手动切过后，到下次日出或日落再自动切",
+        var theme = new Card(W);
+        // 关掉再打开开关会立即按当前时间切一次, 所以不再单独放"按时间切换"按钮
+        theme.AddRow("跟随日出日落切换", "白天浅色、晚上深色；手动切过后，到下次日出或日落再自动切",
             Switch(cfg.AutoTheme, v => { cfg.AutoTheme = v; app.ApplySunTheme(); Later(); }));
-        string tintSub = app.HdrState == true ? "现在开着 HDR，暖色不起作用"
+        // 壁纸用得少, 平时收成一行, 点开才显示两张壁纸的设置
+        int set = (cfg.LightWallpaper.Length > 0 ? 1 : 0) + (cfg.DarkWallpaper.Length > 0 ? 1 : 0);
+        theme.AddRow("顺便换壁纸", set == 0 ? "没设置" : set == 2 ? "浅色、深色各一张" : cfg.LightWallpaper.Length > 0 ? "只设了浅色时的" : "只设了深色时的",
+            Button(wallpaperOpen ? "收起" : "设置…", false, delegate { wallpaperOpen = !wallpaperOpen; Later(); }));
+        if (wallpaperOpen)
+        {
+            WallpaperRow(theme, "浅色时的壁纸", cfg.LightWallpaper, v => cfg.LightWallpaper = v);
+            WallpaperRow(theme, "深色时的壁纸", cfg.DarkWallpaper, v => cfg.DarkWallpaper = v);
+        }
+        y = Section("深色 / 浅色", theme, y);
+
+        var night = new Card(W);
+        string tintSub = app.HdrState == true ? "现在开着 HDR，调黄不起作用"
             : app.NightTintFailed ? "显示器不接受调色曲线"
-            : "晚上把屏幕调黄，不刺眼；别和 Windows 夜间模式一起开";
-        c.AddRow("夜间暖色", tintSub,
+            : "看着不刺眼；Windows 自带的「夜间模式」也是调黄，二选一";
+        night.AddRow("晚上把屏幕调黄", tintSub,
             Drop(KelvinName(cfg.NightKelvin), delegate
             {
                 var m = Ui.Menu();
                 foreach (int k in NightKelvins) { int v = k; Ui.Item(m.Items, KelvinName(v), cfg.NightKelvin == v, delegate { cfg.NightKelvin = v; Changed(); }); }
                 return m;
             }, S(150)));
-        c.AddRow("跟随日出日落调亮度", app.Brightness < 0 ? "需要显示器支持 DDC/CI（见「显示模式」页）" : "白天调亮、晚上调暗显示器；手动调过后，到下次日出或日落再调",
+        night.AddRow("白天、晚上自动调亮度", app.Brightness < 0 ? "需要显示器支持 DDC/CI（见「显示模式」页）" : "调显示器本身的亮度；手动调过后，到下次日出或日落再调",
             Switch(cfg.AutoBrightness, v => { cfg.AutoBrightness = v; app.ApplySunBrightness(); Later(); }));
         if (cfg.AutoBrightness)
         {
-            c.AddRow("白天亮度", null, PercentDrop(cfg.DayBrightness, false, v => { cfg.DayBrightness = v; app.ApplySunBrightness(); }));
-            c.AddRow("夜间亮度", null, PercentDrop(cfg.NightBrightness, false, v => { cfg.NightBrightness = v; app.ApplySunBrightness(); }));
+            night.AddRow("白天亮度", null, PercentDrop(cfg.DayBrightness, false, v => { cfg.DayBrightness = v; app.ApplySunBrightness(); }));
+            night.AddRow("晚上亮度", null, PercentDrop(cfg.NightBrightness, false, v => { cfg.NightBrightness = v; app.ApplySunBrightness(); }));
         }
+        y = Section("晚上护眼", night, y);
+
+        // 上面的自动功能都没开就用不到位置和日出日落时间, 整张卡片不显示
         if (cfg.NeedsLocation)
         {
+            var c = new Card(W);
+            c.AddRow(SunSummary(), cfg.HasLocation ? "上面开着的自动功能按这两个时间切换" : "有了位置才能算出日出日落时间", null);
             var source = Drop(cfg.UseSystemLocation ? "Windows 定位" : "手动输入", delegate
             {
                 var m = Ui.Menu();
@@ -965,13 +985,13 @@ class SettingsForm : Form, IKeyCapture
                     ?? (cfg.HasLocation ? "已定位：" + Settings.FormatCoord(cfg.Latitude) + ", " + Settings.FormatCoord(cfg.Longitude) : "还没有定位");
                 var relocate = Button("重新定位", false, delegate { app.Locate(); Later(); });
                 relocate.Enabled = !app.Locating;
-                c.AddRow("位置（用来算日出日落）", status, Ui.Group(source, relocate));
+                c.AddRow("位置", status, Ui.Group(source, relocate));
                 if (!app.Locating && app.LocationStatus != null)
                     c.AddRow("Windows 定位设置", "需要打开「定位服务」和「允许桌面应用访问你的位置」", Button("打开", false, delegate { App.OpenUrl("ms-settings:privacy-location"); }));
             }
             else
             {
-                c.AddRow("位置（用来算日出日落）", "不用定位，按下面填的坐标算", source);
+                c.AddRow("位置", "不用定位，按下面填的坐标算", source);
                 string shown = coordError != null ? coordText : cfg.HasLocation ? Settings.FormatCoord(cfg.Latitude) + ", " + Settings.FormatCoord(cfg.Longitude) : "";
                 var field = new TextField(shown, S(200));
                 field.Box.LostFocus += delegate { CommitCoord(field.Box.Text); };
@@ -979,17 +999,9 @@ class SettingsForm : Form, IKeyCapture
                 c.AddRow("坐标", "纬度, 经度，比如上海是 31.23, 121.47", field);
                 if (coordError != null) c.AddNote(coordError, Theme.Warn);
             }
-            string sub = !cfg.HasLocation ? "有了位置后才会自动切换"
-                : cfg.AutoTheme ? "手动切过深浅色的话，点右边按钮马上按时间切回来"
-                : "到这两个时间自动切换";
-            if (cfg.AutoTheme)
-                c.AddRow(SunSummary(), sub, Button("按时间切换", false, delegate { app.ApplySunTheme(); Later(); }));
-            else
-                c.AddRow(SunSummary(), sub, null);
+            y = Section("日出日落时间", c, y);
         }
-        WallpaperRow(c, "浅色模式壁纸", cfg.LightWallpaper, v => cfg.LightWallpaper = v);
-        WallpaperRow(c, "深色模式壁纸", cfg.DarkWallpaper, v => cfg.DarkWallpaper = v);
-        return Section("外观", c, y);
+        return y;
     }
 
     static string KelvinName(int k)
@@ -1008,7 +1020,7 @@ class SettingsForm : Form, IKeyCapture
     // 深浅色切换时 (自动或手动) 换成对应的壁纸
     void WallpaperRow(Card c, string title, string path, Action<string> set)
     {
-        string sub = path.Length == 0 ? "没选，切换深浅色时不换壁纸" : File.Exists(path) ? Path.GetFileName(path) : "文件不见了：" + Path.GetFileName(path);
+        string sub = path.Length == 0 ? "没选，不换壁纸" : File.Exists(path) ? Path.GetFileName(path) : "文件不见了：" + Path.GetFileName(path);
         var pick = Button("选择…", false, delegate
         {
             using (var ofd = new OpenFileDialog { Title = "选择" + title, Filter = "图片 (*.jpg;*.jpeg;*.png;*.bmp)|*.jpg;*.jpeg;*.png;*.bmp" })
