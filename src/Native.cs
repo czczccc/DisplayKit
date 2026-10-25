@@ -99,6 +99,10 @@ static class Native
     [DllImport("kernel32.dll")]
     public static extern IntPtr LocalFree(IntPtr mem);
 
+    // "@themeui.dll,-2060" 这种间接字符串 (主题名) 换成当前语言的文字
+    [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
+    public static extern int SHLoadIndirectString(string source, System.Text.StringBuilder buf, int size, IntPtr reserved);
+
     // ---------- DDC/CI (显示器自身的亮度 / 对比度 / 输入源) ----------
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

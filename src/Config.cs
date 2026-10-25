@@ -294,6 +294,7 @@ class Settings
     public bool AutoBrightness;             // 跟随日出日落调显示器亮度 (DDC/CI)
     public int DayBrightness = 80, NightBrightness = 40;
     public string LightWallpaper = "", DarkWallpaper = ""; // 浅色/深色模式下的壁纸, 空 = 不换
+    public string LightTheme = "", DarkTheme = "";         // 改用这个 Windows 主题 (.theme) 里的壁纸, 优先于上面的图片
 
     public bool HasLocation { get { return !double.IsNaN(Latitude) && !double.IsNaN(Longitude); } }
     public bool NeedsLocation { get { return AutoTheme || NightKelvin > 0 || AutoBrightness; } }
@@ -463,6 +464,8 @@ class Settings
         else if (k == "NightBrightness" && int.TryParse(v, out n) && n >= 0 && n <= 100) NightBrightness = n;
         else if (k == "LightWallpaper") LightWallpaper = v;
         else if (k == "DarkWallpaper") DarkWallpaper = v;
+        else if (k == "LightTheme") LightTheme = v;
+        else if (k == "DarkTheme") DarkTheme = v;
         else if (k == "UseSystemLocation") UseSystemLocation = v == "1";
         else if (k == "Location" && ParseLocation(v, out lat, out lon)) { Latitude = lat; Longitude = lon; }
     }
@@ -533,6 +536,8 @@ class Settings
             sb.AppendLine("NightBrightness=" + NightBrightness);
             sb.AppendLine("LightWallpaper=" + LightWallpaper);
             sb.AppendLine("DarkWallpaper=" + DarkWallpaper);
+            sb.AppendLine("LightTheme=" + LightTheme);
+            sb.AppendLine("DarkTheme=" + DarkTheme);
             sb.AppendLine();
             sb.AppendLine("[Display]");
             sb.AppendLine("Device=" + DisplayDevice);

@@ -141,6 +141,74 @@ static class Wallpaper
     }
 }
 
+// Windows 主题 (.theme 文件, 就是"个性化 > 主题"里那几个). 只取名字、深浅模式和壁纸;
+// 不直接打开 .theme, 那样会弹出设置窗口, 还会连鼠标指针、声音一起换掉
+static class WinTheme
+{
+    public class Info
+    {
+        public string Path, Name, Wallpaper;
+        public bool? Light; // 主题自带的模式, null = 没写
+    }
+
+    // 系统自带的在 Windows\Resources\Themes, 商店装的和自己保存的在 LocalAppData; 没有单张壁纸的 (聚焦、幻灯片) 不列
+    public static List<Info> List()
+    {
+        var list = new List<Info>();
+        string[] dirs =
+        {
+            System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), @"Resources\Themes"),
+            System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Microsoft\Windows\Themes"),
+        };
+        foreach (string dir in dirs)
+        {
+            string[] files;
+            try { files = Directory.GetFiles(dir, "*.theme"); }
+            catch { continue; }
+            Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+            foreach (string f in files)
+            {
+                // Custom.theme 是 Windows 记"未保存的主题"的, ADMTheme 是 Auto Dark Mode 的, 内容随时在变
+                string name = System.IO.Path.GetFileNameWithoutExtension(f);
+                if (name.Equals("Custom", StringComparison.OrdinalIgnoreCase) || name.Equals("ADMTheme", StringComparison.OrdinalIgnoreCase)) continue;
+                var t = Read(f);
+                if (t != null && t.Wallpaper.Length > 0) list.Add(t);
+            }
+        }
+        return list;
+    }
+
+    public static Info Read(string path)
+    {
+        string[] lines;
+        try { lines = File.ReadAllLines(path, Encoding.Default); } // 有 BOM 的 (UTF-16) 会自动识别
+        catch { return null; }
+        var t = new Info { Path = path, Name = "", Wallpaper = "" };
+        string section = "";
+        foreach (string raw in lines)
+        {
+            string line = raw.Trim();
+            if (line.StartsWith("[")) { section = line.Trim('[', ']'); continue; }
+            int eq = line.IndexOf('=');
+            if (eq <= 0) continue;
+            string k = line.Substring(0, eq).Trim(), v = line.Substring(eq + 1).Trim();
+            if (section.Equals("Theme", StringComparison.OrdinalIgnoreCase) && k == "DisplayName") t.Name = ResolveName(v);
+            else if (section.Equals(@"Control Panel\Desktop", StringComparison.OrdinalIgnoreCase) && k == "Wallpaper") t.Wallpaper = Environment.ExpandEnvironmentVariables(v);
+            else if (section.Equals("VisualStyles", StringComparison.OrdinalIgnoreCase) && k == "SystemMode") t.Light = !v.Equals("Dark", StringComparison.OrdinalIgnoreCase);
+        }
+        if (t.Wallpaper.Length > 0 && !File.Exists(t.Wallpaper)) t.Wallpaper = "";
+        if (t.Name.Length == 0) t.Name = System.IO.Path.GetFileNameWithoutExtension(path);
+        return t;
+    }
+
+    static string ResolveName(string v)
+    {
+        if (!v.StartsWith("@")) return v;
+        var sb = new StringBuilder(260);
+        return Native.SHLoadIndirectString(Environment.ExpandEnvironmentVariables(v), sb, sb.Capacity, IntPtr.Zero) == 0 ? sb.ToString() : "";
+    }
+}
+
 // 夜间暖色: 按色温调整每台显示器的调色曲线 (gamma ramp), 在原曲线上叠加, 不会冲掉显示器校色
 static class NightTint
 {

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -940,14 +940,15 @@ class SettingsForm : Form, IKeyCapture
         // 关掉再打开开关会立即按当前时间切一次, 所以不再单独放"按时间切换"按钮
         theme.AddRow("跟随日出日落切换", "白天浅色、晚上深色；手动切过后，到下次日出或日落再自动切",
             Switch(cfg.AutoTheme, v => { cfg.AutoTheme = v; app.ApplySunTheme(); Later(); }));
-        // 壁纸用得少, 平时收成一行, 点开才显示两张壁纸的设置
-        int set = (cfg.LightWallpaper.Length > 0 ? 1 : 0) + (cfg.DarkWallpaper.Length > 0 ? 1 : 0);
-        theme.AddRow("顺便换壁纸", set == 0 ? "没设置" : set == 2 ? "浅色、深色各一张" : cfg.LightWallpaper.Length > 0 ? "只设了浅色时的" : "只设了深色时的",
+        // Windows 切深浅色时不会换壁纸; 平时收成一行, 点开才显示两边各用哪个主题的壁纸
+        string lightName = WallpaperName(true), darkName = WallpaperName(false);
+        theme.AddRow("壁纸跟着换", lightName == null && darkName == null ? "没设置，切深浅色时壁纸不变"
+                : "浅色：" + (lightName ?? "不换") + "　深色：" + (darkName ?? "不换"),
             Button(wallpaperOpen ? "收起" : "设置…", false, delegate { wallpaperOpen = !wallpaperOpen; Later(); }));
         if (wallpaperOpen)
         {
-            WallpaperRow(theme, "浅色时的壁纸", cfg.LightWallpaper, v => cfg.LightWallpaper = v);
-            WallpaperRow(theme, "深色时的壁纸", cfg.DarkWallpaper, v => cfg.DarkWallpaper = v);
+            WallpaperRow(theme, true);
+            WallpaperRow(theme, false);
         }
         y = Section("深色 / 浅色", theme, y);
 
@@ -1021,25 +1022,68 @@ class SettingsForm : Form, IKeyCapture
         return k + "K";
     }
 
-    // 深浅色切换时 (自动或手动) 换成对应的壁纸
-    void WallpaperRow(Card c, string title, string path, Action<string> set)
+    // 这一边现在用的壁纸叫什么 (主题名或图片文件名), null = 不换
+    string WallpaperName(bool light)
     {
-        string sub = path.Length == 0 ? "没选，不换壁纸" : File.Exists(path) ? Path.GetFileName(path) : "文件不见了：" + Path.GetFileName(path);
-        var pick = Button("选择…", false, delegate
+        var cfg = app.Cfg;
+        string theme = light ? cfg.LightTheme : cfg.DarkTheme, image = light ? cfg.LightWallpaper : cfg.DarkWallpaper;
+        if (theme.Length > 0)
         {
-            using (var ofd = new OpenFileDialog { Title = "选择" + title, Filter = "图片 (*.jpg;*.jpeg;*.png;*.bmp)|*.jpg;*.jpeg;*.png;*.bmp" })
-            {
-                if (path.Length > 0 && File.Exists(path)) ofd.InitialDirectory = Path.GetDirectoryName(path);
-                if (ofd.ShowDialog(this) != DialogResult.OK) return;
-                set(ofd.FileName);
-            }
+            var t = WinTheme.Read(theme);
+            return t == null || t.Wallpaper.Length == 0 ? "主题不见了" : t.Name;
+        }
+        if (image.Length > 0) return File.Exists(image) ? Path.GetFileName(image) : "图片不见了";
+        return null;
+    }
+
+    // 深浅色切换时 (自动或手动) 换成对应的壁纸: 从 Windows 主题里选, 或者自己选一张图片
+    void WallpaperRow(Card c, bool light)
+    {
+        var cfg = app.Cfg;
+        string title = light ? "浅色时的壁纸" : "深色时的壁纸";
+        string theme = light ? cfg.LightTheme : cfg.DarkTheme, image = light ? cfg.LightWallpaper : cfg.DarkWallpaper;
+        Action<string, string> set = (th, img) =>
+        {
+            if (light) { cfg.LightTheme = th; cfg.LightWallpaper = img; }
+            else { cfg.DarkTheme = th; cfg.DarkWallpaper = img; }
             app.Save();
             app.ApplyWallpaper();
             Later();
-        });
-        Control right = pick;
-        if (path.Length > 0) right = Ui.Group(pick, Button("清除", false, delegate { set(""); Changed(); }));
-        c.AddRow(title, sub, right);
+        };
+        string sub = theme.Length > 0 ? "用这个主题的壁纸，和在 Windows 里点它一样"
+            : image.Length > 0 ? "用自己选的图片" : "没选，不换壁纸";
+        c.AddRow(title, sub, Drop(WallpaperName(light) ?? "不换", delegate
+        {
+            var m = Ui.Menu();
+            Ui.Item(m.Items, "不换", theme.Length == 0 && image.Length == 0, delegate { set("", ""); });
+            m.Items.Add(Ui.Separator());
+            // 和这一边深浅一致的主题直接列出来, 其他的收进子菜单
+            var themes = WinTheme.List();
+            var others = themes.FindAll(t => t.Light != null && t.Light != light);
+            foreach (var t in themes)
+                if (!others.Contains(t)) ThemeItem(m.Items, t, theme, set);
+            if (others.Count > 0)
+            {
+                var sub2 = Ui.Sub(m.Items, light ? "深色主题" : "浅色主题");
+                foreach (var t in others) ThemeItem(sub2.DropDown.Items, t, theme, set);
+            }
+            m.Items.Add(Ui.Separator());
+            Ui.Item(m.Items, "选择图片…", theme.Length == 0 && image.Length > 0, delegate
+            {
+                using (var ofd = new OpenFileDialog { Title = "选择" + title, Filter = "图片 (*.jpg;*.jpeg;*.png;*.bmp)|*.jpg;*.jpeg;*.png;*.bmp" })
+                {
+                    if (image.Length > 0 && File.Exists(image)) ofd.InitialDirectory = Path.GetDirectoryName(image);
+                    if (ofd.ShowDialog(this) == DialogResult.OK) set("", ofd.FileName);
+                }
+            });
+            return m;
+        }, S(180)));
+    }
+
+    static void ThemeItem(ToolStripItemCollection items, WinTheme.Info t, string current, Action<string, string> set)
+    {
+        string path = t.Path;
+        Ui.Item(items, t.Name, string.Equals(current, path, StringComparison.OrdinalIgnoreCase), delegate { set(path, ""); });
     }
 
     void CommitCoord(string text)

@@ -24,7 +24,7 @@ interface IKeyCapture
 
 class App : ApplicationContext
 {
-    public const string Version = "1.6.8";
+    public const string Version = "1.6.9";
     public const string Repo = "czczccc/DisplayKit";
     public static string RepoUrl { get { return "https://github.com/" + Repo; } }
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -1485,10 +1485,19 @@ class App : ApplicationContext
 
     public bool NightTintFailed { get { return NightTint.Failed; } }
 
+    // 选了主题就用主题里的壁纸, 否则用自己选的图片; 空 = 不换
+    public string WallpaperFor(bool light)
+    {
+        string theme = light ? cfg.LightTheme : cfg.DarkTheme;
+        if (theme.Length == 0) return light ? cfg.LightWallpaper : cfg.DarkWallpaper;
+        var t = WinTheme.Read(theme);
+        return t == null ? "" : t.Wallpaper;
+    }
+
     // 壁纸跟随当前的深浅色 (不管是自动切换还是手动改的主题)
     public void ApplyWallpaper()
     {
-        string want = SystemTheme.IsLight() ? cfg.LightWallpaper : cfg.DarkWallpaper;
+        string want = WallpaperFor(SystemTheme.IsLight());
         if (want.Length == 0 || !File.Exists(want) || string.Equals(Wallpaper.Current(), want, StringComparison.OrdinalIgnoreCase)) return;
         Wallpaper.Set(want);
         Log.Write("更换壁纸: " + want);
