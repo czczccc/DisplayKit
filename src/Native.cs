@@ -133,6 +133,9 @@ static class Native
 
     [DllImport("dwmapi.dll")]
     public static extern int DwmFlush(); // 等到下一次桌面合成 (即下一帧)
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hwnd, int cmd);
+    public const int SW_SHOWNOACTIVATE = 4;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct SIZE { public int cx, cy; }

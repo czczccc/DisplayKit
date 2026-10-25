@@ -23,11 +23,24 @@ class Flyout : Form
         AutoScaleMode = AutoScaleMode.None;
         KeyPreview = true;
         Build();
-        Deactivate += delegate { FadeClose(); };
+        Deactivate += delegate
+        {
+            IntPtr fg = Native.GetForegroundWindow();
+            // 焦点跑到了动画替身上 (按说不会, 以防万一): 抢回来, 不关面板
+            if (ghost != null && fg == ghost.Handle) { Activate(); return; }
+            if (unchecked(Environment.TickCount - shownAt) < 500)
+            {
+                var cls = new System.Text.StringBuilder(64);
+                if (fg != IntPtr.Zero) Native.GetClassName(fg, cls, cls.Capacity);
+                Log.Write("快捷面板刚打开就失去焦点, 当前前台窗口: " + (fg == IntPtr.Zero ? "无" : cls.ToString()));
+            }
+            FadeClose();
+        };
         KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) FadeClose(); };
     }
 
     bool closing;
+    int shownAt;        // 打开的时间, 用来发现"刚打开就被关掉"的情况
     int slide;          // 滑动方向和距离: 任务栏在下面时为正 (从下往上滑出)
     GhostWindow ghost;  // 动画期间代替面板显示的截图
 
@@ -144,6 +157,7 @@ class Flyout : Form
               : Math.Max(wa.Top + gap, Math.Min(cursor.Y - Height / 2, wa.Bottom - Height - gap));
         // 和 Windows 11 快速设置一样: 从任务栏方向滑出, 前 1/3 时间里淡入, 很快到位再慢慢停稳
         slide = cursor.Y < wa.Top ? -S(40) : S(40);
+        shownAt = Environment.TickCount;
         Opacity = 0; // 真面板先透明地显示出来 (要拿焦点, 也要靠它截图)
         Location = new Point(x, y);
         Show();
@@ -301,8 +315,9 @@ class Flyout : Form
 }
 
 // 动画用的"替身": 一张带透明通道的图做成的分层窗口. 图只上传一次, 之后每帧只改位置和透明度,
-// 由桌面合成器 (显卡) 完成, 不触发任何重绘
-class GhostWindow : Form
+// 由桌面合成器 (显卡) 完成, 不触发任何重绘.
+// 用最底层的原生窗口而不是 Form: Form 显示置顶窗口时可能抢走焦点, 面板一失去焦点就会关掉
+class GhostWindow : NativeWindow, IDisposable
 {
     readonly int pad;          // 图四周为阴影留的边距
     readonly Native.SIZE size;
@@ -312,28 +327,18 @@ class GhostWindow : Form
     public GhostWindow(Bitmap image, int pad)
     {
         this.pad = pad;
-        FormBorderStyle = FormBorderStyle.None;
-        StartPosition = FormStartPosition.Manual;
-        ShowInTaskbar = false;
-        TopMost = true;
         size = new Native.SIZE { cx = image.Width, cy = image.Height };
         IntPtr screen = Native.GetDC(IntPtr.Zero);
         memDc = Native.CreateCompatibleDC(screen);
         Native.ReleaseDC(IntPtr.Zero, screen);
         bitmap = image.GetHbitmap(Color.FromArgb(0));
         oldBitmap = Native.SelectObject(memDc, bitmap);
-    }
-
-    protected override bool ShowWithoutActivation { get { return true; } }
-
-    protected override CreateParams CreateParams
-    {
-        get
+        CreateHandle(new CreateParams
         {
-            var cp = base.CreateParams;
-            cp.ExStyle |= 0x80 | 0x8 | 0x20 | Native.WS_EX_LAYERED | 0x08000000; // TOOLWINDOW | TOPMOST | TRANSPARENT | LAYERED | NOACTIVATE
-            return cp;
-        }
+            Style = unchecked((int)0x80000000), // WS_POPUP
+            ExStyle = 0x80 | 0x8 | 0x20 | Native.WS_EX_LAYERED | 0x08000000, // TOOLWINDOW | TOPMOST | TRANSPARENT | LAYERED | NOACTIVATE
+            X = -32000, Y = -32000, Width = 1, Height = 1,
+        });
     }
 
     // x, y 是面板本身左上角的位置 (阴影边距自动扣掉)
@@ -345,14 +350,15 @@ class GhostWindow : Form
         {
             var src = new Native.POINT();
             var sz = size;
-            Native.UpdateLayeredWindow(Handle, IntPtr.Zero, ref pt, ref sz, memDc, ref src, 0, ref blend, Native.ULW_ALPHA);
+            if (!Native.UpdateLayeredWindow(Handle, IntPtr.Zero, ref pt, ref sz, memDc, ref src, 0, ref blend, Native.ULW_ALPHA))
+                Log.Write("动画窗口 UpdateLayeredWindow 失败, 错误码 " + System.Runtime.InteropServices.Marshal.GetLastWin32Error());
             uploaded = true;
-            Show();
+            Native.ShowWindow(Handle, Native.SW_SHOWNOACTIVATE); // 显示但不激活
         }
         else Native.MoveLayeredWindow(Handle, IntPtr.Zero, ref pt, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, 0, ref blend, Native.ULW_ALPHA);
     }
 
-    protected override void Dispose(bool disposing)
+    public void Dispose()
     {
         if (memDc != IntPtr.Zero)
         {
@@ -361,6 +367,6 @@ class GhostWindow : Form
             Native.DeleteDC(memDc);
             memDc = IntPtr.Zero;
         }
-        base.Dispose(disposing);
+        if (Handle != IntPtr.Zero) DestroyHandle();
     }
 }
