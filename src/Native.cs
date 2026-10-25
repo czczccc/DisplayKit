@@ -73,7 +73,10 @@ static class Native
     public static extern bool SystemParametersInfo(uint action, uint param, string pv, uint winIni);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern bool SystemParametersInfo(uint action, uint param, System.Text.StringBuilder pv, uint winIni);
+    [DllImport("user32.dll")]
+    public static extern bool SystemParametersInfo(uint action, uint param, ref int pv, uint winIni);
     public const uint SPI_SETCURSORS = 0x57, SPI_SETDESKWALLPAPER = 0x14, SPI_GETDESKWALLPAPER = 0x73;
+    public const uint SPI_GETCLIENTAREAANIMATION = 0x1042; // "动画效果"开关
     public const uint SPIF_UPDATEINIFILE = 1, SPIF_SENDCHANGE = 2;
 
     // ---------- DDC/CI (显示器自身的亮度 / 对比度 / 输入源) ----------
@@ -117,6 +120,14 @@ static class Native
     public static extern bool AllowSetForegroundWindow(int pid);
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLong")]
+    public static extern int GetWindowLong(IntPtr hWnd, int index);
+    [DllImport("user32.dll", EntryPoint = "SetWindowLong")]
+    public static extern int SetWindowLong(IntPtr hWnd, int index, int value);
+    [DllImport("user32.dll")]
+    public static extern bool SetLayeredWindowAttributes(IntPtr hWnd, uint key, byte alpha, uint flags);
+    public const int GWL_EXSTYLE = -20, WS_EX_LAYERED = 0x80000;
+    public const uint LWA_ALPHA = 2, SWP_NOZORDER = 4, SWP_FRAMECHANGED = 0x20;
     [DllImport("user32.dll")]
     public static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")]

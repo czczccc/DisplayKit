@@ -140,7 +140,13 @@ class SettingsForm : Form, IKeyCapture
         AddNav("\uE7F4", "防烧屏", Page.Guard, ref y);
         AddNav("\uE7F8", "显示模式", Page.Display, ref y);
         AddNav("\uE713", "通用", Page.General, ref y);
+
+        indicator = new NavIndicator();
+        nav.Controls.Add(indicator);
+        indicator.MoveTo(navButtons[(int)page], false);
     }
+
+    NavIndicator indicator;
 
     void AddNav(string glyph, string text, Page p, ref int y)
     {
@@ -152,6 +158,7 @@ class SettingsForm : Form, IKeyCapture
             captureTarget = 0;
             keyHint = null;
             foreach (var nb in navButtons) { nb.Selected = nb == b; nb.Invalidate(); }
+            indicator.MoveTo(b, true);
             content.AutoScrollPosition = Point.Empty;
             Rebuild();
         };

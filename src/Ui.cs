@@ -259,10 +259,84 @@ class ModernRenderer : ToolStripProfessionalRenderer
     }
 }
 
-// 自绘控件的基类: 双缓冲 + 悬停/按下状态
+// 补间动画: 一个共用的计时器驱动, 同一控件同一个 key 的新动画替换旧的.
+// 系统关了"动画效果" (设置 > 辅助功能 > 视觉效果) 时直接跳到结果
+static class Anim
+{
+    class Item
+    {
+        public Control Owner;
+        public string Key;
+        public int Start, Duration;
+        public float From, To;
+        public Action<float> Step;
+        public Action Done;
+    }
+
+    static readonly List<Item> items = new List<Item>();
+    static Timer timer;
+
+    public static bool Enabled
+    {
+        get
+        {
+            int on = 1;
+            try { Native.SystemParametersInfo(Native.SPI_GETCLIENTAREAANIMATION, 0, ref on, 0); } catch { }
+            return on != 0;
+        }
+    }
+
+    // 先快后慢, 和 Windows 11 的大多数过渡一样
+    static float EaseOut(float t) { t = 1 - t; return 1 - t * t * t; }
+
+    public static void Run(Control owner, string key, float from, float to, int ms, Action<float> step, Action done = null)
+    {
+        items.RemoveAll(i => i.Owner == owner && i.Key == key);
+        if (!Enabled || ms <= 0 || from == to)
+        {
+            step(to);
+            if (done != null) done();
+            return;
+        }
+        items.Add(new Item { Owner = owner, Key = key, Start = Environment.TickCount, Duration = ms, From = from, To = to, Step = step, Done = done });
+        if (timer == null)
+        {
+            timer = new Timer { Interval = 15 };
+            timer.Tick += Tick;
+        }
+        timer.Start();
+        step(from);
+    }
+
+    static void Tick(object sender, EventArgs e)
+    {
+        int now = Environment.TickCount;
+        foreach (var i in items.ToArray())
+        {
+            if (i.Owner.IsDisposed) { items.Remove(i); continue; }
+            float t = Math.Min(1f, unchecked(now - i.Start) / (float)i.Duration);
+            i.Step(i.From + (i.To - i.From) * EaseOut(t));
+            if (t >= 1)
+            {
+                items.Remove(i);
+                if (i.Done != null) i.Done();
+            }
+        }
+        if (items.Count == 0) timer.Stop();
+    }
+
+    public static Color Blend(Color a, Color b, float t)
+    {
+        t = Math.Max(0, Math.Min(1, t));
+        return Color.FromArgb((int)(a.A + (b.A - a.A) * t), (int)(a.R + (b.R - a.R) * t), (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
+    }
+}
+
+// 自绘控件的基类: 双缓冲 + 悬停/按下状态; 悬停颜色渐变 (hoverT 0 → 1)
 class FlatControl : Control
 {
     protected bool hover, down;
+    protected float hoverT;
 
     public FlatControl()
     {
@@ -271,8 +345,10 @@ class FlatControl : Control
         Font = Theme.Font;
     }
 
-    protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
-    protected override void OnMouseLeave(EventArgs e) { hover = false; down = false; Invalidate(); base.OnMouseLeave(e); }
+    void AnimateHover(float to, int ms) { Anim.Run(this, "hover", hoverT, to, ms, v => { hoverT = v; Invalidate(); }); }
+
+    protected override void OnMouseEnter(EventArgs e) { hover = true; AnimateHover(1, 120); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { hover = false; down = false; AnimateHover(0, 200); base.OnMouseLeave(e); }
     protected override void OnMouseDown(MouseEventArgs e) { if (e.Button == MouseButtons.Left) { down = true; Invalidate(); } base.OnMouseDown(e); }
     protected override void OnMouseUp(MouseEventArgs e) { down = false; Invalidate(); base.OnMouseUp(e); }
     protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
@@ -311,8 +387,8 @@ class RoundButton : FlatControl
     {
         var g = Begin(e);
         bool accent = (Primary || Highlight) && Enabled;
-        Color fill = accent ? (down ? Theme.AccentPressed : hover ? Theme.AccentHover : Theme.Accent)
-                            : (down ? Theme.ControlPressed : hover && Enabled ? Theme.ControlHover : Theme.Control);
+        Color fill = accent ? (down ? Theme.AccentPressed : Anim.Blend(Theme.Accent, Theme.AccentHover, hoverT))
+                            : (down ? Theme.ControlPressed : Enabled ? Anim.Blend(Theme.Control, Theme.ControlHover, hoverT) : Theme.Control);
         using (var path = Theme.RoundRect(new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), Ui.S(4)))
         {
             using (var b = new SolidBrush(fill)) g.FillPath(b, path);
@@ -342,11 +418,13 @@ class RoundButton : FlatControl
 class Toggle : FlatControl
 {
     bool on;
+    float onT; // 0 = 关, 1 = 开; 点击时圆点滑过去, 颜色渐变
     public event EventHandler Changed;
 
     public Toggle(bool value)
     {
         on = value;
+        onT = on ? 1 : 0;
         Size = new Size(Ui.S(40), Ui.S(20));
     }
 
@@ -355,7 +433,7 @@ class Toggle : FlatControl
     protected override void OnClick(EventArgs e)
     {
         on = !on;
-        Invalidate();
+        Anim.Run(this, "on", onT, on ? 1 : 0, 160, v => { onT = v; Invalidate(); });
         if (Changed != null) Changed(this, e);
         base.OnClick(e);
     }
@@ -364,19 +442,16 @@ class Toggle : FlatControl
     {
         var g = Begin(e);
         var r = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
+        Color off = Anim.Blend(Theme.Control, Theme.ControlHover, hoverT), accent = Anim.Blend(Theme.Accent, Theme.AccentHover, hoverT);
         using (var path = Theme.RoundRect(r, r.Height / 2))
         {
-            if (on)
-                using (var b = new SolidBrush(hover ? Theme.AccentHover : Theme.Accent)) g.FillPath(b, path);
-            else
-            {
-                using (var b = new SolidBrush(hover ? Theme.ControlHover : Theme.Control)) g.FillPath(b, path);
-                using (var p = new Pen(Theme.SubText, Math.Max(1f, Ui.Scale))) g.DrawPath(p, path);
-            }
+            using (var b = new SolidBrush(Anim.Blend(off, accent, onT))) g.FillPath(b, path);
+            if (onT < 1)
+                using (var p = new Pen(Color.FromArgb((int)(255 * (1 - onT)), Theme.SubText), Math.Max(1f, Ui.Scale))) g.DrawPath(p, path);
         }
-        float d = Ui.S(hover ? 14 : 12);
-        float cx = on ? Width - Height / 2f : Height / 2f, cy = Height / 2f;
-        using (var b = new SolidBrush(on ? Theme.AccentText : Theme.SubText))
+        float d = Ui.S(12) + Ui.S(2) * hoverT;
+        float cx = Height / 2f + (Width - Height) * onT, cy = Height / 2f;
+        using (var b = new SolidBrush(Anim.Blend(Theme.SubText, Theme.AccentText, onT)))
             g.FillEllipse(b, cx - d / 2, cy - d / 2, d, d);
     }
 }
@@ -464,7 +539,7 @@ class Slider : FlatControl
         float d = Ui.S(18), cx = x0 + fill;
         using (var b = new SolidBrush(Theme.Control)) g.FillEllipse(b, cx - d / 2, cy - d / 2, d, d);
         using (var p = new Pen(Theme.ControlBorder)) g.DrawEllipse(p, cx - d / 2, cy - d / 2, d, d);
-        float dot = Ui.S(hover || dragging ? 10 : 8);
+        float dot = Ui.S(8) + Ui.S(2) * (dragging ? 1 : hoverT);
         using (var b = new SolidBrush(Theme.Accent)) g.FillEllipse(b, cx - dot / 2, cy - dot / 2, dot, dot);
         TextRenderer.DrawText(g, value + "%", Font, new Rectangle(Width - TextW, 0, TextW, Height), Theme.Text, flags | TextFormatFlags.Right);
     }
@@ -487,8 +562,8 @@ class Tile : FlatControl
     {
         var g = Begin(e);
         int bh = Ui.S(48);
-        Color fill = On ? (down ? Theme.AccentPressed : hover ? Theme.AccentHover : Theme.Accent)
-                        : (down ? Theme.ControlPressed : hover ? Theme.ControlHover : Theme.Control);
+        Color fill = On ? (down ? Theme.AccentPressed : Anim.Blend(Theme.Accent, Theme.AccentHover, hoverT))
+                        : (down ? Theme.ControlPressed : Anim.Blend(Theme.Control, Theme.ControlHover, hoverT));
         using (var path = Theme.RoundRect(new RectangleF(0.5f, 0.5f, Width - 1.5f, bh - 1.5f), Ui.S(4)))
         {
             using (var b = new SolidBrush(fill)) g.FillPath(b, path);
@@ -497,6 +572,36 @@ class Tile : FlatControl
         var flags = TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
         TextRenderer.DrawText(g, glyph, Theme.Icons, new Rectangle(0, 0, Width, bh), On ? Theme.AccentText : Theme.Text, flags);
         TextRenderer.DrawText(g, Text, Theme.Small, new Rectangle(0, bh + Ui.S(2), Width, Height - bh - Ui.S(2)), Theme.Text, flags | TextFormatFlags.EndEllipsis);
+    }
+}
+
+// 导航选中项左侧的强调色竖条; 切换页面时从旧选项滑到新选项 (Windows 11 设置的样式)
+class NavIndicator : Control
+{
+    public NavIndicator()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+        Size = new Size(Ui.S(3), Ui.S(16));
+    }
+
+    // 竖条中心对准 target 的垂直中心
+    public void MoveTo(Control target, bool animate)
+    {
+        int to = target.Top + (target.Height - Height) / 2;
+        Left = target.Left;
+        BringToFront();
+        if (!animate) { Top = to; return; }
+        Anim.Run(this, "move", Top, to, 250, v => Top = (int)Math.Round(v));
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Theme.NavSelected);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var b = new SolidBrush(Theme.Accent))
+        using (var path = Theme.RoundRect(new RectangleF(0, 0, Width, Height), Width / 2f))
+            g.FillPath(b, path);
     }
 }
 
@@ -514,14 +619,11 @@ class NavButton : FlatControl
 
     protected override void OnPaint(PaintEventArgs e)
     {
+        // 左侧的强调色竖条由 NavIndicator 单独画, 切换页面时滑过去
         var g = Begin(e);
-        if (Selected || hover)
-            using (var b = new SolidBrush(Selected ? Theme.NavSelected : Theme.NavHover))
+        if (Selected || hoverT > 0)
+            using (var b = new SolidBrush(Selected ? Theme.NavSelected : Anim.Blend(Parent != null ? Parent.BackColor : Theme.Bg, Theme.NavHover, hoverT)))
             using (var path = Theme.RoundRect(new RectangleF(0, 0, Width - 1, Height - 1), Ui.S(4)))
-                g.FillPath(b, path);
-        if (Selected)
-            using (var b = new SolidBrush(Theme.Accent))
-            using (var path = Theme.RoundRect(new RectangleF(0, Height / 2f - Ui.S(8), Ui.S(3), Ui.S(16)), Ui.S(1)))
                 g.FillPath(b, path);
         var flags = TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
         TextRenderer.DrawText(g, glyph, Theme.Icons, new Rectangle(Ui.S(14), 0, Ui.S(24), Height), Theme.Text, flags | TextFormatFlags.HorizontalCenter);

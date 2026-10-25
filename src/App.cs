@@ -24,7 +24,7 @@ interface IKeyCapture
 
 class App : ApplicationContext
 {
-    public const string Version = "1.6.1";
+    public const string Version = "1.6.2";
     public const string Repo = "czczccc/DisplayKit";
     public static string RepoUrl { get { return "https://github.com/" + Repo; } }
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -1270,7 +1270,7 @@ class App : ApplicationContext
 
     void OpenFlyout()
     {
-        if (flyout != null) { flyout.Close(); return; }
+        if (flyout != null) { flyout.FadeClose(); return; }
         if (Since(flyoutClosedAt) < 300) return; // 点托盘图标让面板失去焦点关掉的那一下, 不要马上又打开
         if (settings == null || !settings.Visible) Ui.SetDpi(Ui.DpiAt(Cursor.Position));
         if (brightness < 0 || Since(lastDdcRead) > 10000) RefreshDdc(); // 打开时顺便重读, 显示器断电重开过也能马上找回来

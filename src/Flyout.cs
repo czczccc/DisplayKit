@@ -23,8 +23,30 @@ class Flyout : Form
         AutoScaleMode = AutoScaleMode.None;
         KeyPreview = true;
         Build();
-        Deactivate += delegate { Close(); };
-        KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };
+        Deactivate += delegate { FadeClose(); };
+        KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) FadeClose(); };
+    }
+
+    bool closing;
+
+    // 淡出后关闭 (点到别处、Esc、再点一次托盘图标)
+    public void FadeClose()
+    {
+        if (closing || IsDisposed) return;
+        closing = true;
+        SetLayered(true);
+        Anim.Run(this, "show", (float)Opacity, 0, 120, v => Opacity = v, Close);
+    }
+
+    // 动画期间要半透明 (分层窗口); 完全显示后去掉, Windows 11 才会给窗口加圆角和阴影
+    void SetLayered(bool on)
+    {
+        int ex = Native.GetWindowLong(Handle, Native.GWL_EXSTYLE);
+        int want = on ? ex | Native.WS_EX_LAYERED : ex & ~Native.WS_EX_LAYERED;
+        if (want == ex) return;
+        Native.SetWindowLong(Handle, Native.GWL_EXSTYLE, want);
+        if (on) Native.SetLayeredWindowAttributes(Handle, 0, (byte)(Opacity * 255), Native.LWA_ALPHA); // 刚加上分层样式时先给个透明度, 否则窗口会消失
+        Native.SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE | Native.SWP_FRAMECHANGED);
     }
 
     protected override CreateParams CreateParams
@@ -55,10 +77,25 @@ class Flyout : Form
         int y = cursor.Y > wa.Bottom ? wa.Bottom - Height - gap
               : cursor.Y < wa.Top ? wa.Top + gap
               : Math.Max(wa.Top + gap, Math.Min(cursor.Y - Height / 2, wa.Bottom - Height - gap));
-        Location = new Point(x, y);
+        // 和 Windows 11 快速设置一样: 从任务栏方向滑出 + 淡入
+        int offset = cursor.Y < wa.Top ? -S(24) : S(24);
+        Opacity = 0;
+        Location = new Point(x, y + offset);
         Show();
         Activate();
         Native.SetForegroundWindow(Handle); // 拿到焦点, 点到别处时才会触发 Deactivate 关闭
+        Anim.Run(this, "show", 0, 1, 220, t =>
+        {
+            if (closing) return;
+            Opacity = t;
+            Top = y + (int)Math.Round(offset * (1 - t));
+        }, delegate
+        {
+            if (closing || IsDisposed) return;
+            Opacity = 1;
+            Top = y;
+            SetLayered(false);
+        });
     }
 
     public void Rebuild()

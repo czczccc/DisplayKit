@@ -160,7 +160,11 @@ class OsdForm : Form
         TopMost = true;
         DoubleBuffered = true;
         Opacity = 0.97; // 分层窗口, 配合 WS_EX_TRANSPARENT 才能让鼠标穿透
-        hideTimer.Tick += delegate { hideTimer.Stop(); Hide(); };
+        hideTimer.Tick += delegate
+        {
+            hideTimer.Stop();
+            Anim.Run(this, "fade", (float)Opacity, 0, 250, v => Opacity = v, Hide); // 淡出后隐藏
+        };
     }
 
     protected override bool ShowWithoutActivation { get { return true; } }
@@ -186,8 +190,9 @@ class OsdForm : Form
         Location = new Point(wa.Left + (wa.Width - Width) / 2, wa.Bottom - Height - (int)(56 * scale));
         using (var path = Theme.RoundRect(new RectangleF(0, 0, Width, Height), 8 * scale)) Region = new Region(path);
         BackColor = Theme.Card;
-        if (!Visible) Show();
+        if (!Visible) { Opacity = 0; Show(); }
         Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0, Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
+        Anim.Run(this, "fade", (float)Opacity, 0.97f, 120, v => Opacity = v); // 淡入; 正在淡出时按快捷键会淡回来
         Invalidate();
         hideTimer.Stop();
         hideTimer.Start();
