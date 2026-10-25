@@ -1050,7 +1050,7 @@ class SettingsForm : Form, IKeyCapture
             app.ApplyWallpaper();
             Later();
         };
-        string sub = theme.Length > 0 ? "用这个主题的壁纸，和在 Windows 里点它一样"
+        string sub = theme.Length > 0 ? "用这个主题自带的壁纸"
             : image.Length > 0 ? "用自己选的图片" : "没选，不换壁纸";
         c.AddRow(title, sub, Drop(WallpaperName(light) ?? "不换", delegate
         {
@@ -1077,7 +1077,7 @@ class SettingsForm : Form, IKeyCapture
                 }
             });
             return m;
-        }, S(180)));
+        }, S(230)));
     }
 
     static void ThemeItem(ToolStripItemCollection items, WinTheme.Info t, string current, Action<string, string> set)
