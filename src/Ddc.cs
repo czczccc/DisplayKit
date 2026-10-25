@@ -147,7 +147,10 @@ class DdcWriter
 {
     readonly object sync = new object();
     readonly Dictionary<byte, KeyValuePair<string, int>> pending = new Dictionary<byte, KeyValuePair<string, int>>();
+    readonly Action failed; // 写入失败时在后台线程上调用
     bool running;
+
+    public DdcWriter(Action failed) { this.failed = failed; }
 
     public void SetPercent(string device, byte code, int percent)
     {
@@ -175,7 +178,11 @@ class DdcWriter
                 item = e.Current.Value;
                 pending.Remove(code);
             }
-            if (!Ddc.SetPercent(item.Key, code, item.Value)) Log.Write("DDC/CI 写入失败: 0x" + code.ToString("X2") + " = " + item.Value + "%");
+            if (!Ddc.SetPercent(item.Key, code, item.Value))
+            {
+                Log.Write("DDC/CI 写入失败: 0x" + code.ToString("X2") + " = " + item.Value + "%");
+                if (failed != null) failed();
+            }
             Thread.Sleep(150);
         }
     }

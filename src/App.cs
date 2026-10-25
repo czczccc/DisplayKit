@@ -24,7 +24,7 @@ interface IKeyCapture
 
 class App : ApplicationContext
 {
-    public const string Version = "1.5.0";
+    public const string Version = "1.6.0";
     public const string Repo = "czczccc/DisplayKit";
     public static string RepoUrl { get { return "https://github.com/" + Repo; } }
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -78,8 +78,13 @@ class App : ApplicationContext
 
     // 显示器硬件设置 (DDC/CI), 作用在"要切换的显示器"上
     const int BrightnessStep = 10;
-    readonly DdcWriter ddc = new DdcWriter();
+    readonly DdcWriter ddc;
     string ddcDevice;                        // 下面这些值读自哪台显示器
+    bool inputsTried;                        // 这台显示器的输入源列表读过了 (能力字符串要一两秒, 只读一次)
+    int lastDdcRead = unchecked(Environment.TickCount - 600000);
+    int ddcRetryAt; bool ddcRetry;           // 显示器断电重开、睡眠唤醒等之后过几秒重读
+    Flyout flyout;
+    int flyoutClosedAt = unchecked(Environment.TickCount - 600000);
     int brightness = -1, contrast = -1;      // 百分比, -1 = 读不到 (不支持 DDC/CI 或还在读)
     int input = -1;
     List<int> inputs;                        // 显示器声明支持的输入源
@@ -146,6 +151,7 @@ class App : ApplicationContext
     public App(bool autostart, bool updated, EventWaitHandle showSignal)
     {
         var h = invoker.Handle; // 强制创建句柄, 供 BeginInvoke 使用
+        ddc = new DdcWriter(delegate { invoker.BeginInvoke((Action)delegate { ScheduleDdcRefresh(3000); }); }); // 写入失败多半是显示器断开过
         var p = Cursor.Position; anchorX = p.X; anchorY = p.Y;
         Log.Write("启动 v" + Version + (autostart ? " (开机自启)" : "") + (updated ? " (自动更新后)" : ""));
 
@@ -156,7 +162,7 @@ class App : ApplicationContext
         tray.Icon = iconActive;
         tray.Menu = Ui.Menu();
         tray.Menu.Opening += (s, e) => { FillTrayMenu(); e.Cancel = false; };
-        tray.LeftClick += OpenSettings;
+        tray.LeftClick += OpenFlyout; // 左键: 快捷面板; 右键: 菜单 (含打开设置)
         tray.BalloonClick += tag => { if (tag == "update") InstallUpdate(); };
         tray.TryAdd();
 
@@ -171,6 +177,7 @@ class App : ApplicationContext
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         SystemEvents.SessionSwitch += OnSessionSwitch;
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
 
         MigrateAutoStart();
         if (IsAutoStart()) SetAutoStart(true); // exe 换过位置时更新自启路径
@@ -677,6 +684,7 @@ class App : ApplicationContext
             if (next == rampTarget) rampTarget = -1;
         }
 
+        CheckDdc();
         if (Since(lastAutoCheck) >= 2000) CheckAutoSwitch();
         if (Since(lastSunCheck) >= 30000) CheckSunTheme();
         UpdateNightTint();
@@ -909,6 +917,7 @@ class App : ApplicationContext
                 locked = false;
                 HideOverlay();
                 lastActivity = Environment.TickCount;
+                ScheduleDdcRefresh(3000); // 锁屏期间显示器可能关过
             }
         });
     }
@@ -1103,6 +1112,11 @@ class App : ApplicationContext
         catch (Exception ex) { Log.Write("打开 " + target + " 失败: " + ex.Message); }
     }
 
+    void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode == PowerModes.Resume) invoker.BeginInvoke((Action)delegate { ScheduleDdcRefresh(5000); }); // 睡眠唤醒后显示器要几秒才响应 DDC/CI
+    }
+
     void OnDisplaySettingsChanged(object sender, EventArgs e)
     {
         invoker.BeginInvoke((Action)delegate
@@ -1110,6 +1124,7 @@ class App : ApplicationContext
             if (overlayVisible) { HideOverlay(); ShowOverlay(); }
             if (!switching) RefreshDisplay();
             lastTintApply = unchecked(Environment.TickCount - 10000); // 改分辨率会重置调色曲线, 马上重新设
+            ScheduleDdcRefresh(3000); // 显示器断电重开也会走到这里; 等几秒它的 DDC/CI 准备好再读
             lastSunCheck = unchecked(Environment.TickCount - 60000); // 睡眠唤醒也会触发, 顺便检查日出日落
         });
     }
@@ -1130,6 +1145,7 @@ class App : ApplicationContext
         MakeIcons();
         tray.Icon = Paused ? iconPaused : iconActive;
         if (settings != null) settings.ApplyTheme();
+        if (flyout != null) flyout.Rebuild();
     }
 
     // ---------- 日出日落主题 ----------
@@ -1185,21 +1201,28 @@ class App : ApplicationContext
         if (ddcReading || display == null) return;
         ddcReading = true;
         string device = display.Device;
-        bool sameDevice = device == ddcDevice;
-        var knownInputs = sameDevice ? inputs : null;
+        bool readInputs = device != ddcDevice || !inputsTried;
+        var knownInputs = readInputs ? null : inputs;
         ThreadPool.QueueUserWorkItem(delegate
         {
+            // 每次都重新打开显示器句柄 (见 Ddc.Open), 显示器断电重开后不会卡在失效的旧句柄上
             int b = Ddc.GetPercent(device, Ddc.Brightness), c = b < 0 ? -1 : Ddc.GetPercent(device, Ddc.Contrast);
             int cur, max, inp = b >= 0 && Ddc.Get(device, Ddc.Input, out cur, out max) ? cur & 0xFF : -1;
-            var list = b < 0 ? null : knownInputs ?? Ddc.Inputs(device);
+            var list = b < 0 ? null : readInputs ? Ddc.Inputs(device) : knownInputs;
             invoker.BeginInvoke((Action)delegate
             {
+                bool wasMissing = brightness < 0;
                 ddcReading = false;
+                lastDdcRead = Environment.TickCount;
+                if (device != ddcDevice) inputsTried = false;
                 ddcDevice = device;
                 if (!dimmed) brightness = b;
                 contrast = c;
                 input = inp;
                 inputs = list;
+                if (b >= 0) inputsTried = true;
+                if (wasMissing && b >= 0) Log.Write("已通过 DDC/CI 连上显示器, 亮度 " + b + "%");
+                if (flyout != null) flyout.OnDdcRead();
                 // 上次降了亮度没来得及恢复 (异常退出), 现在恢复
                 if (cfg.DimmedFrom >= 0 && b >= 0 && !dimmed)
                 {
@@ -1212,6 +1235,48 @@ class App : ApplicationContext
                 if (settings != null) settings.OnDdcRead();
             });
         });
+    }
+
+    void ScheduleDdcRefresh(int delayMs)
+    {
+        ddcRetry = true;
+        ddcRetryAt = unchecked(Environment.TickCount + delayMs);
+    }
+
+    // 读不到时每 30 秒重试 (显示器断电、DDC/CI 刚打开等), 读得到时每 2 分钟校准一次 (显示器上按键调过亮度)
+    void CheckDdc()
+    {
+        if (display == null || ddcReading) return;
+        bool due = ddcRetry && Since(ddcRetryAt) >= 0;
+        if (!due && Since(lastDdcRead) < (brightness < 0 ? 30000 : 120000)) return;
+        if (dimmed || rampTarget >= 0) return; // 正在降亮度 / 过渡中, 读回来的值没意义
+        ddcRetry = false;
+        RefreshDdc();
+    }
+
+    // 用户在滑块上调的亮度: 取消闲置降亮度和自动过渡
+    public void SetBrightnessFromUser(int percent)
+    {
+        Undim();
+        rampTarget = -1;
+        SetBrightness(percent, false);
+    }
+
+    public void ToggleTheme()
+    {
+        try { SystemTheme.Set(!SystemTheme.IsLight()); }
+        catch (Exception ex) { Log.Write("切换主题失败: " + ex.Message); }
+    }
+
+    void OpenFlyout()
+    {
+        if (flyout != null) { flyout.Close(); return; }
+        if (Since(flyoutClosedAt) < 300) return; // 点托盘图标让面板失去焦点关掉的那一下, 不要马上又打开
+        if (settings == null || !settings.Visible) Ui.SetDpi(Ui.DpiAt(Cursor.Position));
+        if (brightness < 0 || Since(lastDdcRead) > 10000) RefreshDdc(); // 打开时顺便重读, 显示器断电重开过也能马上找回来
+        flyout = new Flyout(this);
+        flyout.FormClosed += delegate { flyout = null; flyoutClosedAt = Environment.TickCount; };
+        flyout.ShowAt(Cursor.Position);
     }
 
     public void SetBrightness(int percent, bool showOsd)
@@ -1420,15 +1485,13 @@ class App : ApplicationContext
         m.Font = Theme.Font;
         m.Padding = new Padding(0, Ui.S(4), 0, Ui.S(4));
 
+        // 右键: 打开主界面 + 完整菜单; 亮度等快捷调节在左键面板里
+        var open = Ui.Item(m.Items, "打开 DisplayKit 设置", false, delegate { OpenSettings(); });
+        open.Font = Theme.Bold;
+        m.Items.Add(Ui.Separator());
         m.Items.Add(Ui.Label("防烧屏：" + guardStatus));
         if (display != null) m.Items.Add(Ui.Label("显示：" + display.Describe()));
-        if (Brightness >= 0)
-        {
-            // 亮度滑块直接放在菜单里, 拖动时菜单不会关
-            var slider = new Slider(Brightness, Ui.S(240), "");
-            slider.ValueChanged += delegate { Undim(); rampTarget = -1; SetBrightness(slider.Value, false); };
-            m.Items.Add(new ToolStripControlHost(slider) { AutoSize = false, Size = slider.Size, Margin = new Padding(Ui.S(4), Ui.S(2), Ui.S(4), Ui.S(2)) });
-        }
+        if (Brightness >= 0) m.Items.Add(Ui.Label("亮度：" + Brightness + "%（左键托盘图标调节）"));
         m.Items.Add(Ui.Separator());
 
         if (cfg.Profiles.Count > 0)
@@ -1464,11 +1527,7 @@ class App : ApplicationContext
         }
         // 手动切换: 开着日出日落自动切换时, 保持到下一次日出或日落
         bool light = SystemTheme.IsLight();
-        Ui.Item(m.Items, light ? "切换到深色模式" : "切换到浅色模式", false, delegate
-        {
-            try { SystemTheme.Set(!light); }
-            catch (Exception ex) { Log.Write("切换主题失败: " + ex.Message); }
-        });
+        Ui.Item(m.Items, light ? "切换到深色模式" : "切换到浅色模式", false, delegate { ToggleTheme(); });
         m.Items.Add(Ui.Separator());
 
         var blank = Ui.Item(m.Items, "立即黑屏", false, delegate { ShowOverlay(); });
@@ -1488,7 +1547,6 @@ class App : ApplicationContext
             }
         }
         m.Items.Add(Ui.Separator());
-        Ui.Item(m.Items, "设置…", false, delegate { OpenSettings(); });
         Ui.Item(m.Items, "退出", false, delegate { ExitThread(); });
     }
 
@@ -1563,6 +1621,8 @@ class App : ApplicationContext
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
         SystemEvents.SessionSwitch -= OnSessionSwitch;
+        SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+        if (flyout != null) flyout.Close();
         StopHooks();
         StopLocate(null);
         CursorHider.Restore();

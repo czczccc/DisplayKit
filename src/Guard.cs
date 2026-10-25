@@ -202,7 +202,7 @@ class OsdForm : Form
         using (var icons = new Font(Theme.Icons.FontFamily, 18 * scale, GraphicsUnit.Pixel))
         using (var font = new Font(Theme.Font.FontFamily, 14 * scale, GraphicsUnit.Pixel))
         {
-            TextRenderer.DrawText(g, "", icons, new Rectangle(0, 0, (int)(52 * scale), Height), Theme.Text, flags | TextFormatFlags.HorizontalCenter);
+            TextRenderer.DrawText(g, "\uE706", icons, new Rectangle(0, 0, (int)(52 * scale), Height), Theme.Text, flags | TextFormatFlags.HorizontalCenter);
             if (percent < 0)
             {
                 TextRenderer.DrawText(g, caption, font, new Rectangle((int)(52 * scale), 0, Width - (int)(60 * scale), Height), Theme.Text, flags);

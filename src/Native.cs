@@ -116,6 +116,8 @@ static class Native
     [DllImport("user32.dll")]
     public static extern bool AllowSetForegroundWindow(int pid);
     [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
     public static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")]
     public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
