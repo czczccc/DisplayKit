@@ -106,7 +106,7 @@ class SettingsForm : Form, IKeyCapture
     void ApplyColors()
     {
         BackColor = Theme.Bg;
-        nav.BackColor = Theme.Sidebar;
+        nav.BackColor = Theme.Bg;
         content.BackColor = Theme.Bg;
     }
 
@@ -129,23 +129,22 @@ class SettingsForm : Form, IKeyCapture
         foreach (var c in old) c.Dispose();
         navButtons.Clear();
 
-        var logo = Ui.Text("DisplayKit", Theme.Header, Theme.Text, Theme.Sidebar);
+        var logo = Ui.Text("DisplayKit", Theme.Header, Theme.Text, Theme.Bg);
         logo.Bounds = new Rectangle(S(22), S(18), nav.Width - S(30), S(28));
         nav.Controls.Add(logo);
-        var ver = Ui.Text("v" + App.Version + " · 防烧屏 + 显示模式", Theme.Small, Theme.SubText, Theme.Sidebar);
+        var ver = Ui.Text("v" + App.Version + " · 防烧屏 + 显示模式", Theme.Small, Theme.SubText, Theme.Bg);
         ver.Bounds = new Rectangle(S(22), S(46), nav.Width - S(30), S(20));
         nav.Controls.Add(ver);
 
-        // 图标底色沿用 macOS 系统设置的配色
         int y = S(84);
-        AddNav("\uE793", "防烧屏", Color.FromArgb(0x58, 0x56, 0xD6), Page.Guard, ref y);
-        AddNav("\uE7F4", "显示模式", Color.FromArgb(0x00, 0x7A, 0xFF), Page.Display, ref y);
-        AddNav("\uE713", "通用", Color.FromArgb(0x8E, 0x8E, 0x93), Page.General, ref y);
+        AddNav("\uE7F4", "防烧屏", Page.Guard, ref y);
+        AddNav("\uE7F8", "显示模式", Page.Display, ref y);
+        AddNav("\uE713", "通用", Page.General, ref y);
     }
 
-    void AddNav(string glyph, string text, Color tint, Page p, ref int y)
+    void AddNav(string glyph, string text, Page p, ref int y)
     {
-        var b = new NavButton(glyph, text, tint) { Selected = page == p, Bounds = new Rectangle(S(10), y, nav.Width - S(20), S(36)) };
+        var b = new NavButton(glyph, text) { Selected = page == p, Bounds = new Rectangle(S(8), y, nav.Width - S(16), S(40)) };
         b.Click += delegate
         {
             if (page == p) return;
@@ -158,7 +157,7 @@ class SettingsForm : Form, IKeyCapture
         };
         nav.Controls.Add(b);
         navButtons.Add(b);
-        y += S(40);
+        y += S(44);
     }
 
     // ---------- 页面 ----------

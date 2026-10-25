@@ -100,7 +100,7 @@ class Flyout : Form
         y += S(52);
 
         // 亮度 (DDC/CI)
-        // 亮度 (DDC/CI): 和控制中心一样放在单独的圆角模块里
+        // 亮度 (DDC/CI): 放在单独的卡片里
         shownBrightness = app.Brightness;
         var module = new Card(w) { Location = new Point(pad, y) };
         var head = Ui.Text("显示器亮度", Theme.Bold, Theme.Text, Theme.Card);
@@ -190,7 +190,7 @@ class Flyout : Form
     int Grid(List<Tile> tiles, int y)
     {
         int pad = S(16), gap = S(10), cols = 3;
-        int tw = (W - pad * 2 - gap * (cols - 1)) / cols, th = S(78);
+        int tw = (W - pad * 2 - gap * (cols - 1)) / cols, th = S(74);
         for (int i = 0; i < tiles.Count; i++)
         {
             var t = tiles[i];
