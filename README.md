@@ -62,6 +62,7 @@ Windows 下的 OLED 显示器托盘工具，两个功能合二为一：
   - 切换输入源（DP / HDMI / USB-C，列表来自显示器自己声明支持的输入）
   - 写入在后台进行，只发最新的值并限制频率，拖动滑块不卡、也不会频繁写显示器存储
   - **显示器断电重开后自动重连**：每次读写都重新打开显示器句柄（不会卡在失效的旧句柄上）；显示配置变化、睡眠唤醒、解锁、写入失败、打开快捷面板时都会重读，读不到时每 30 秒重试，平时每 2 分钟校准一次（显示器上按键调过亮度也能同步）
+- **录制显示器菜单设置（实验）**：双模切换（如 4K160 / 1080p320）、24 寸模式这类功能各家用的 VCP 码不一样，所以用录制的方式：点「开始录制」先读一遍全部 VCP 码，去显示器菜单里改一项，点「完成」再读一遍对比，列出变化的码；试过能切换就保存，之后在设置或托盘菜单「显示器菜单设置」里一键切换。没有通过 DDC/CI 开放的设置录不到
 - 一键导入 DisplayModeSwitch 的 `DisplayModeSwitch.ini`
 - 命令行（切完就退出，适合做桌面快捷方式或给游戏启动器用）：
 
@@ -116,7 +117,7 @@ git push origin v1.1.0
 - 空闲检测与拦截：`WH_KEYBOARD_LL` / `WH_MOUSE_LL` 低级钩子；声音检测：Core Audio 峰值表；手柄：XInput
 - 分辨率/刷新率：`ChangeDisplaySettingsEx`（先 `CDS_TEST` 校验再写入）
 - 缩放：`DisplayConfigSetDeviceInfo`，与 Windows"设置 → 显示 → 缩放"相同的系统接口，立即生效、无需注销；切换时先改分辨率再改缩放
-- 显示器亮度 / 对比度 / 输入源：DDC/CI（`dxva2.dll` 的 `SetVCPFeature`，VCP 0x10 / 0x12 / 0x60），输入源列表来自显示器的能力字符串
+- 显示器亮度 / 对比度 / 输入源：DDC/CI（`dxva2.dll` 的 `SetVCPFeature`，VCP 0x10 / 0x12 / 0x60），输入源列表来自显示器的能力字符串；录制显示器菜单时读 0x00–0xFF 全部 VCP 码对比前后差异，保存在配置的 `[Osd:名字]` 段
 - HDR：`DisplayConfigSetDeviceInfo` 的 `SET_HDR_STATE`（Windows 11 24H2 起），更早的系统用 `SET_ADVANCED_COLOR_STATE`
 - 深浅色：写 `HKCU\...\Themes\Personalize` 的 `AppsUseLightTheme` / `SystemUsesLightTheme` 后广播 `WM_SETTINGCHANGE("ImmersiveColorSet")`；位置：`System.Device.Location`；日出日落：NOAA 算法
 - 指针隐藏：`SetSystemCursor` 换成透明指针，恢复时 `SPI_SETCURSORS` 重新加载指针方案；夜间暖色：`SetDeviceGammaRamp`；壁纸：`SPI_SETDESKWALLPAPER`

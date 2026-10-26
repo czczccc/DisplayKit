@@ -79,8 +79,8 @@ static class Ddc
         return Set(device, code, (int)Math.Round(Math.Max(0, Math.Min(100, percent)) * max / 100.0));
     }
 
-    // 显示器声明支持的输入源 (能力字符串里的 60(...)), 读不到时返回 null. 要一两秒, 放后台调用
-    public static List<int> Inputs(string device)
+    // 显示器的能力字符串 (支持哪些 VCP 码、各自可选的值), 读不到时返回 null. 要一两秒, 放后台调用
+    public static string Capabilities(string device)
     {
         var mons = Open(device);
         if (mons == null) return null;
@@ -90,16 +90,55 @@ static class Ddc
             uint len;
             if (!Native.GetCapabilitiesStringLength(h, out len) || len == 0) return null;
             var sb = new StringBuilder((int)len);
-            if (!Native.CapabilitiesRequestAndCapabilitiesReply(h, sb, len)) return null;
-            var m = Regex.Match(sb.ToString(), @"(?<![0-9A-Fa-f])60\s*\(([0-9A-Fa-f\s]+)\)");
-            if (!m.Success) return null;
-            var list = new List<int>();
-            foreach (var t in m.Groups[1].Value.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
-                list.Add(Convert.ToInt32(t, 16));
-            return list.Count > 0 ? list : null;
+            return Native.CapabilitiesRequestAndCapabilitiesReply(h, sb, len) ? sb.ToString() : null;
         }
         catch { return null; }
         finally { Close(mons); }
+    }
+
+    // 显示器声明支持的输入源 (能力字符串里的 60(...)), 读不到时返回 null
+    public static List<int> Inputs(string device)
+    {
+        string caps = Capabilities(device);
+        if (caps == null) return null;
+        var m = Regex.Match(caps, @"(?<![0-9A-Fa-f])60\s*\(([0-9A-Fa-f\s]+)\)");
+        if (!m.Success) return null;
+        var list = new List<int>();
+        foreach (var t in m.Groups[1].Value.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+            list.Add(Convert.ToInt32(t, 16));
+        return list.Count > 0 ? list : null;
+    }
+
+    // 读出全部 VCP 码 (0x00-0xFF) 的当前值, 用来对比在显示器菜单里改了哪一项; 只读不写, 读不到的码不在结果里.
+    // 要十几秒, 放后台调用; progress 收到已经读了几个
+    public static Dictionary<int, int> Scan(string device, Action<int> progress)
+    {
+        var mons = Open(device);
+        if (mons == null) return null;
+        try
+        {
+            var result = new Dictionary<int, int>();
+            for (int code = 0; code < 256; code++)
+            {
+                uint c, m;
+                if (Native.GetVCPFeatureAndVCPFeatureReply(mons[0].hPhysicalMonitor, (byte)code, IntPtr.Zero, out c, out m)) result[code] = (int)c;
+                if (progress != null) progress(code + 1);
+            }
+            return result;
+        }
+        finally { Close(mons); }
+    }
+
+    // 只反映显示器状态、不能写的码 (行场频、使用时长、固件版本等): 切换模式时会跟着变, 但不是开关
+    public static bool IsInfo(int code)
+    {
+        switch (code)
+        {
+            case 0x02: case 0x0B: case 0x52: case 0xAC: case 0xAE: case 0xB2: case 0xB6:
+            case 0xC0: case 0xC6: case 0xC8: case 0xC9: case 0xDF:
+                return true;
+        }
+        return false;
     }
 
     // MCCS 标准里的输入源编号; 不同显示器不一定都按标准来

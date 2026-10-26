@@ -703,6 +703,7 @@ class SettingsForm : Form, IKeyCapture
         AddKeyHint(c1, TargetToggle, TargetHdr);
         y = Section("显示器", c1, y);
         y = BuildHardware(y);
+        y = BuildRecorder(y);
 
         var c2 = new Card(W);
         if (cfg.Profiles.Count == 0)
@@ -793,6 +794,157 @@ class SettingsForm : Form, IKeyCapture
         c.AddRow("调暗快捷键", "托盘菜单里也有亮度滑块", KeyButton(TargetBrightDown, cfg.BrightDownMods, cfg.BrightDownVk));
         AddKeyHint(c, TargetBrightUp, TargetBrightDown);
         return Section("显示器亮度与输入源（DDC/CI）", c, y);
+    }
+
+    // ----- 录制显示器菜单 -----
+    // 双模切换、24 寸模式这类功能各家显示器用的 VCP 码不一样: 先读一遍全部 VCP 码, 用户在显示器菜单里改一项,
+    // 再读一遍对比, 变了的码就是这项设置, 之后可以直接写回去
+
+    enum Rec { Idle, Before, Waiting, After, Done }
+    Rec rec;
+    int recCount;                  // 正在读第几个码
+    Label recLabel;
+    string recDevice, recError;
+    Dictionary<int, int> recBefore;
+    readonly List<int[]> recChanges = new List<int[]>(); // {码, 之前的值, 之后的值}
+
+    int BuildRecorder(int y)
+    {
+        var cfg = app.Cfg;
+        if (app.Brightness < 0 && rec == Rec.Idle && cfg.OsdActions.Count == 0) return y; // DDC/CI 不通
+        var c = new Card(W);
+        recLabel = null;
+
+        if (rec == Rec.Idle)
+            c.AddRow("录制一项设置", "录下你在显示器菜单里的操作（如切换双模、24 寸模式），之后一键切换", Button("开始录制", true, delegate { StartScan(false); }));
+        else if (rec == Rec.Before || rec == Rec.After)
+            recLabel = c.AddRow(ScanText(), rec == Rec.Before ? "大约十几秒，先不要动显示器菜单" : "正在对比", null);
+        else if (rec == Rec.Waiting)
+        {
+            c.AddRow("现在去显示器菜单里改一项", "比如切换双模；改好、画面稳定后点「完成」",
+                Ui.Group(Button("完成", true, delegate { StartScan(true); }), Button("取消", false, delegate { rec = Rec.Idle; Later(); })));
+            if (recError != null) c.AddNote(recError, Theme.Warn);
+        }
+        else
+        {
+            if (recChanges.Count == 0)
+                c.AddNote("没有发现变化。这台显示器的这项设置可能没有通过 DDC/CI 开放，只能在显示器菜单里改。", Theme.SubText);
+            else
+                c.AddNote("下面是变化了的 VCP 码。先点按钮试一下能不能切换，能的话点「保存」，以后在这里或托盘菜单里一键切换。", Theme.SubText);
+            foreach (var ch in recChanges)
+            {
+                int code = ch[0], before = ch[1], after = ch[2];
+                string title = "VCP 0x" + code.ToString("X2") + "：" + before + " → " + after;
+                if (Ddc.IsInfo(code)) { c.AddRow(title, "只读的状态信息，跟着变而已，不是开关", null); continue; }
+                c.AddRow(title, null, Ui.Group(
+                    Button("设为 " + before, false, delegate { TryOsd(code, before); }),
+                    Button("设为 " + after, false, delegate { TryOsd(code, after); }),
+                    Drop("保存", delegate
+                    {
+                        var m = Ui.Menu();
+                        Ui.Item(m.Items, "保存「设为 " + before + "」（录制前的状态）…", false, delegate { SaveOsd(code, before); });
+                        Ui.Item(m.Items, "保存「设为 " + after + "」（录制后的状态）…", false, delegate { SaveOsd(code, after); });
+                        return m;
+                    }, S(72))));
+            }
+            c.AddRow("重新录制", null, Ui.Group(Button("重新录制", false, delegate { StartScan(false); }), Button("关闭", false, delegate { rec = Rec.Idle; Later(); })));
+        }
+
+        foreach (var a in cfg.OsdActions)
+        {
+            var act = a;
+            c.AddRow(act.Name, act.Describe(), Ui.Group(
+                Button("应用", true, delegate { app.ApplyOsd(act); }),
+                Button("删除", false, delegate
+                {
+                    if (MessageBox.Show(this, "删除「" + act.Name + "」？", "DisplayKit", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                    cfg.OsdActions.Remove(act);
+                    Changed();
+                })));
+        }
+        return Section("显示器菜单设置（实验）", c, y);
+    }
+
+    string ScanText() { return (rec == Rec.Before ? "正在读取显示器的全部设置… " : "正在重新读取… ") + recCount + " / 256"; }
+
+    // 后台读一遍全部 VCP 码; after = 用户已经在显示器菜单里改好了, 读完和之前对比
+    void StartScan(bool after)
+    {
+        string device = after ? recDevice : app.DdcDevice;
+        if (device == null) return;
+        recDevice = device;
+        recError = null;
+        recCount = 0;
+        rec = after ? Rec.After : Rec.Before;
+        Later();
+        System.Threading.ThreadPool.QueueUserWorkItem(delegate
+        {
+            string caps = after ? null : Ddc.Capabilities(device);
+            var values = Ddc.Scan(device, n =>
+            {
+                if (n % 8 != 0) return;
+                Post(delegate { recCount = n; if (recLabel != null && !recLabel.IsDisposed) recLabel.Text = ScanText(); });
+            });
+            Post(delegate { ScanDone(after, values, caps); });
+        });
+    }
+
+    void Post(Action a)
+    {
+        try { if (!IsDisposed && IsHandleCreated) BeginInvoke(a); }
+        catch (InvalidOperationException) { } // 窗口刚好关了
+    }
+
+    void ScanDone(bool after, Dictionary<int, int> values, string caps)
+    {
+        if (values == null || values.Count == 0)
+        {
+            // 切双模等会让显示器重新连接, 刚连上时可能还读不到
+            recError = "读不到显示器，等几秒再点「完成」。";
+            rec = after ? Rec.Waiting : Rec.Idle;
+            if (!after) MessageBox.Show(this, "读不到显示器的设置（需要 DDC/CI）。", "DisplayKit", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Rebuild();
+            return;
+        }
+        if (!after)
+        {
+            recBefore = values;
+            Log.Write("录制显示器菜单: 读到 " + values.Count + " 个 VCP 码; 能力字符串: " + (caps ?? "读不到"));
+            rec = Rec.Waiting;
+        }
+        else
+        {
+            recChanges.Clear();
+            var log = new List<string>();
+            foreach (var kv in values)
+            {
+                int old;
+                if (!recBefore.TryGetValue(kv.Key, out old) || old == kv.Value) continue;
+                recChanges.Add(new[] { kv.Key, old, kv.Value });
+                log.Add("0x" + kv.Key.ToString("X2") + " " + old + "→" + kv.Value);
+            }
+            Log.Write("录制显示器菜单: " + (log.Count == 0 ? "没有变化" : "变化 " + string.Join(", ", log.ToArray())));
+            rec = Rec.Done;
+        }
+        Rebuild();
+    }
+
+    void TryOsd(int code, int value)
+    {
+        app.ApplyOsd(new OsdAction { Name = "测试", Code = code, Value = value });
+    }
+
+    void SaveOsd(int code, int value)
+    {
+        using (var dlg = new NameForm("保存显示器设置", "给这个设置起个名字（如「1080p 320Hz」「24 寸模式」）：", "", app.AppIcon))
+        {
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            var list = app.Cfg.OsdActions;
+            var a = new OsdAction { Name = dlg.Result, Code = code, Value = value };
+            int idx = list.FindIndex(o => string.Equals(o.Name, a.Name, StringComparison.OrdinalIgnoreCase));
+            if (idx >= 0) list[idx] = a; else list.Add(a);
+        }
+        Changed();
     }
 
     DisplayProfile NewFromCurrent()

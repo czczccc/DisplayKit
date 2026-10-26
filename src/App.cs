@@ -24,7 +24,7 @@ interface IKeyCapture
 
 class App : ApplicationContext
 {
-    public const string Version = "1.6.10";
+    public const string Version = "1.6.11";
     public const string Repo = "czczccc/DisplayKit";
     public static string RepoUrl { get { return "https://github.com/" + Repo; } }
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -136,6 +136,7 @@ class App : ApplicationContext
     public int Input { get { return input; } }
     public List<int> Inputs { get { return inputs; } }
     public bool DdcReading { get { return ddcReading; } }
+    public string DdcDevice { get { return ddcDevice; } }
     public int ProfileIndex { get { return profileIndex; } }
     public Icon AppIcon { get { return formIcon ?? iconActive; } }
     public string LatestVersion { get { return latestVersion; } }
@@ -1457,6 +1458,19 @@ class App : ApplicationContext
         input = value;
     }
 
+    // 在显示器菜单里录下来的设置; 切双模这类设置会让显示器重新连接, 过几秒再重读亮度等
+    public void ApplyOsd(OsdAction a)
+    {
+        if (ddcDevice == null) return;
+        string device = ddcDevice;
+        Log.Write("显示器设置「" + a.Name + "」: " + a.Describe());
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            if (!Ddc.Set(device, (byte)a.Code, a.Value)) Log.Write("写入显示器设置失败");
+            invoker.BeginInvoke((Action)delegate { ScheduleDdcRefresh(3000); });
+        });
+    }
+
     public bool ConfirmSwitchInput(IWin32Window owner, int value)
     {
         return MessageBox.Show(owner, "切换到「" + Ddc.InputName(value) + "」后，这台电脑的画面会从显示器上消失，需要用显示器的按键（或另一台设备）切回来。\n\n继续？",
@@ -1637,6 +1651,15 @@ class App : ApplicationContext
                 {
                     if (value != input && ConfirmSwitchInput(null, value)) SwitchInput(value);
                 });
+            }
+        }
+        if (cfg.OsdActions.Count > 0 && ddcDevice != null)
+        {
+            var sub = Ui.Sub(m.Items, "显示器菜单设置");
+            foreach (var a in cfg.OsdActions)
+            {
+                var act = a;
+                Ui.Item(sub.DropDownItems, act.Name, false, delegate { ApplyOsd(act); });
             }
         }
         // 手动切换: 开着日出日落自动切换时, 保持到下一次日出或日落

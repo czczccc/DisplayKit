@@ -243,6 +243,15 @@ class DisplayProfile
     }
 }
 
+// 在显示器菜单里录下来的一项设置 (双模切换、24 寸模式等厂商私有功能): 往 VCP 码写这个值
+class OsdAction
+{
+    public string Name = "";
+    public int Code = -1, Value;
+
+    public string Describe() { return "VCP 0x" + Code.ToString("X2") + " = " + Value; }
+}
+
 class Settings
 {
     public const int WakeAny = 0, WakeAnyKey = 1, WakeKey = 2;
@@ -285,6 +294,7 @@ class Settings
     public int ToggleVk, ToggleMods;    // 在模式间循环切换
     public int HdrVk, HdrMods;          // 开关 HDR
     public List<DisplayProfile> Profiles = new List<DisplayProfile>();
+    public List<OsdAction> OsdActions = new List<OsdAction>();
 
     // ----- 外观 -----
     public bool AutoTheme;                  // 跟随日出日落切换深色/浅色
@@ -362,6 +372,7 @@ class Settings
             if (!File.Exists(FilePath)) { s.AddBuiltInsOnFirstRun(); return s; }
             string section = "guard";
             DisplayProfile mode = null;
+            OsdAction osd = null;
             foreach (var raw in File.ReadAllLines(FilePath, Encoding.UTF8))
             {
                 string line = raw.Trim();
@@ -370,10 +381,16 @@ class Settings
                 {
                     string name = line.Substring(1, line.Length - 2).Trim();
                     mode = null;
+                    osd = null;
                     if (name.StartsWith("Mode:", StringComparison.OrdinalIgnoreCase))
                     {
                         mode = new DisplayProfile { Name = name.Substring(5).Trim() };
                         s.Profiles.Add(mode);
+                    }
+                    else if (name.StartsWith("Osd:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        osd = new OsdAction { Name = name.Substring(4).Trim() };
+                        s.OsdActions.Add(osd);
                     }
                     section = name.ToLowerInvariant();
                     if (section == "display") sawDisplay = true;
@@ -383,11 +400,13 @@ class Settings
                 if (i <= 0) continue;
                 string k = line.Substring(0, i).Trim(), v = line.Substring(i + 1).Trim();
                 if (mode != null) ReadMode(mode, k, v);
+                else if (osd != null) ReadOsd(osd, k, v);
                 else if (section == "display") s.ReadDisplay(k, v);
                 else if (section == "appearance") s.ReadAppearance(k, v);
                 else s.ReadGuard(k, v); // 没有段落头的旧版配置也当作防烧屏设置
             }
             s.Profiles.RemoveAll(p => p.Width <= 0 || p.Height <= 0 || p.Name.Length == 0);
+            s.OsdActions.RemoveAll(a => a.Code < 0 || a.Name.Length == 0);
             // 用户自己删光模式后不再自动加回来 (那时配置里已经有 [Display] 段)
             if (!sawDisplay && s.Profiles.Count == 0) s.AddBuiltInsOnFirstRun();
         }
@@ -484,6 +503,14 @@ class Settings
         else if (k == "Brightness" && int.TryParse(v, out n) && n >= -1 && n <= 100) p.Brightness = n;
     }
 
+    static void ReadOsd(OsdAction a, string k, string v)
+    {
+        int n;
+        if (k == "Code" && v.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+            && int.TryParse(v.Substring(2), NumberStyles.HexNumber, null, out n) && n >= 0 && n < 256) a.Code = n;
+        else if (k == "Value" && int.TryParse(v, out n) && n >= 0) a.Value = n;
+    }
+
     public void Save()
     {
         try
@@ -556,6 +583,13 @@ class Settings
                 sb.AppendLine("Verified=" + (p.Verified ? "1" : "0"));
                 sb.AppendLine("Hdr=" + p.Hdr);
                 sb.AppendLine("Brightness=" + p.Brightness);
+            }
+            foreach (var a in OsdActions)
+            {
+                sb.AppendLine();
+                sb.AppendLine("[Osd:" + a.Name + "]");
+                sb.AppendLine("Code=0x" + a.Code.ToString("X2"));
+                sb.AppendLine("Value=" + a.Value);
             }
             // 先写临时文件再替换, 写到一半断电/崩溃也不会把原来的配置弄坏
             string tmp = FilePath + ".tmp";
