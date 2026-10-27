@@ -113,7 +113,18 @@ class TrayIcon : NativeWindow
     // 关闭显示器 (由这个隐藏的顶层窗口交给系统处理)
     public void MonitorOff()
     {
-        Native.PostMessage(Handle, Native.WM_SYSCOMMAND, new IntPtr(Native.SC_MONITORPOWER), new IntPtr(2));
+        SetMonitorPower(2);
+    }
+
+    public void MonitorOn()
+    {
+        SetMonitorPower(-1);
+    }
+
+    void SetMonitorPower(int state)
+    {
+        if (!Native.PostMessage(Handle, Native.WM_SYSCOMMAND, new IntPtr(Native.SC_MONITORPOWER), new IntPtr(state)))
+            Log.Write("发送显示器电源指令失败, 状态 " + state);
     }
 
     public void ShowMenu()

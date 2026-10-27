@@ -24,7 +24,7 @@ interface IKeyCapture
 
 class App : ApplicationContext
 {
-    public const string Version = "1.6.11";
+    public const string Version = "1.6.12";
     public const string Repo = "czczccc/DisplayKit";
     public static string RepoUrl { get { return "https://github.com/" + Repo; } }
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -155,6 +155,7 @@ class App : ApplicationContext
         ddc = new DdcWriter(delegate { invoker.BeginInvoke((Action)delegate { ScheduleDdcRefresh(3000); }); }); // 写入失败多半是显示器断开过
         var p = Cursor.Position; anchorX = p.X; anchorY = p.Y;
         Log.Write("启动 v" + Version + (autostart ? " (开机自启)" : "") + (updated ? " (自动更新后)" : ""));
+        Log.Write("防烧屏配置: 闲置 " + cfg.TimeoutSec + " 秒黑屏, 黑屏后 " + cfg.PowerOffMin + " 分钟待机 (0=不关闭), 关屏时锁屏=" + cfg.LockOnPowerOff + ", 锁屏后 " + cfg.LockScreenOffSec + " 秒关屏 (0=不关闭)");
 
         Theme.Load();
         ToolStripManager.Renderer = new ModernRenderer();
@@ -465,7 +466,7 @@ class App : ApplicationContext
     {
         if (dismissQueued) return;
         dismissQueued = true;
-        invoker.BeginInvoke((Action)HideOverlay);
+        invoker.BeginInvoke((Action)delegate { HideOverlay(); });
     }
 
     // ---------- 黑屏 ----------
@@ -502,6 +503,7 @@ class App : ApplicationContext
         powerOffNow = false;
         dismissQueued = false;
         overlayVisible = true;
+        Log.Write("进入黑屏, 覆盖 " + targets.Count + " 台显示器");
     }
 
     // 黑屏前的提示: 要黑的屏幕逐渐变暗并倒计时, 鼠标键盘穿透, 动一下 lastActivity 就会刷新, 提示随之消失
@@ -649,15 +651,21 @@ class App : ApplicationContext
         if (!DesktopIcons.Toggle()) tray.ShowBalloon("找不到桌面窗口", "资源管理器可能没有在运行", TrayIcon.InfoWarning);
     }
 
-    void HideOverlay()
+    void HideOverlay(bool wakeMonitor = true)
     {
         if (!overlayVisible) return;
         overlayVisible = false;
         dismissQueued = false;
+        monitorOffSent = false;
+        powerOffNow = false;
         foreach (var f in overlays) f.Hide(); // 先全部隐藏, 让画面立即恢复
         foreach (var f in overlays) { f.Close(); f.Dispose(); }
         overlays.Clear();
         lastActivity = Environment.TickCount;
+        // 唤醒按键会被钩子吞掉, 不能只依赖 Windows 用这次输入唤醒处于待机的显示器.
+        // 锁屏或重建覆盖窗口时只撤遮罩, 不改变显示器的电源状态.
+        if (wakeMonitor) tray.MonitorOn();
+        Log.Write(wakeMonitor ? "撤销黑屏, 请求点亮显示器" : "撤销黑屏, 保持显示器电源状态");
     }
 
     public void Pause(int minutes)
@@ -736,9 +744,10 @@ class App : ApplicationContext
                 int quiet = powerOffNow && !monitorOffSent ? 1000 : 10000; // 快捷键刚按下: 只等松开按键 (松键也会唤醒显示器)
                 if ((!monitorOffSent || wokenSince) && Since(lastRawInput) >= quiet)
                 {
-                    // 第一次关显示器时顺便锁屏 (锁屏后黑屏会撤掉, 由"锁屏后关闭显示器"接着管)
+                    // 第一次关显示器时顺便锁屏; 锁屏事件撤掉遮罩并继承这次关屏状态, 避免重复关屏.
                     if (!monitorOffSent && cfg.LockOnPowerOff && !Native.LockWorkStation())
                         Log.Write("锁屏失败, 错误码 " + System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+                    Log.Write("发送关屏指令（" + (powerOffNow ? "立即关屏" : "黑屏后待机") + (wokenSince ? ", 输入后再次关屏" : "") + "）");
                     tray.MonitorOff();
                     monitorOffSent = true;
                     monitorOffAt = Environment.TickCount;
@@ -751,6 +760,7 @@ class App : ApplicationContext
             lastActivity = Environment.TickCount;
             if (cfg.LockScreenOffSec > 0 && !lockOffSent && Since(lockedAt) >= cfg.LockScreenOffSec * 1000)
             {
+                Log.Write("发送关屏指令（锁屏计时）");
                 tray.MonitorOff();
                 lockOffSent = true;
             }
@@ -1011,16 +1021,22 @@ class App : ApplicationContext
             if (e.Reason == SessionSwitchReason.SessionLock)
             {
                 // 锁屏界面在黑屏窗口之上, 黑屏留着只会挡掉下面"锁屏后关闭显示器"的逻辑
-                HideOverlay();
+                // 自动关屏同时锁屏时已经发过关屏指令, 不要十秒后又关一次.
+                // 若之后有过输入, 则不能认为显示器仍处于待机.
+                bool alreadyOff = overlayVisible && monitorOffSent && unchecked(lastRawInput - monitorOffAt) <= 0;
+                HideOverlay(false);
                 CursorHider.Restore();
                 locked = true;
                 lockedAt = Environment.TickCount;
-                lockOffSent = false;
+                lockOffSent = alreadyOff;
+                Log.Write(alreadyOff ? "电脑已锁屏, 此前已发送关屏指令" : "电脑已锁屏, 开始锁屏关屏计时");
             }
             else if (e.Reason == SessionSwitchReason.SessionUnlock)
             {
                 // 解锁时用户已经输过密码, 不需要再按唤醒键
                 locked = false;
+                lockOffSent = false;
+                Log.Write("电脑已解锁");
                 HideOverlay();
                 lastActivity = Environment.TickCount;
                 ScheduleDdcRefresh(3000); // 锁屏期间显示器可能关过
@@ -1220,6 +1236,7 @@ class App : ApplicationContext
 
     void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
     {
+        Log.Write("系统电源事件: " + e.Mode);
         if (e.Mode == PowerModes.Resume) invoker.BeginInvoke((Action)delegate { ScheduleDdcRefresh(5000); }); // 睡眠唤醒后显示器要几秒才响应 DDC/CI
     }
 
@@ -1227,7 +1244,7 @@ class App : ApplicationContext
     {
         invoker.BeginInvoke((Action)delegate
         {
-            if (overlayVisible) { HideOverlay(); ShowOverlay(); }
+            if (overlayVisible) { HideOverlay(false); ShowOverlay(); }
             if (!switching) RefreshDisplay();
             lastTintApply = unchecked(Environment.TickCount - 10000); // 改分辨率会重置调色曲线, 马上重新设
             ScheduleDdcRefresh(3000); // 显示器断电重开也会走到这里; 等几秒它的 DDC/CI 准备好再读
